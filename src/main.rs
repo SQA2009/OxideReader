@@ -295,6 +295,7 @@ fn main() {
                             MouseScrollDelta::PixelDelta(pos) => pos.y as f32,
                         };
 
+                        let old_zoom = zoom_level;
                         if scroll_y > 0.0 {
                             zoom_level *= ZOOM_FACTOR;
                         } else if scroll_y < 0.0 {
@@ -306,6 +307,17 @@ fn main() {
                         if zoom_level > MAX_ZOOM_LEVEL {
                             zoom_level = MAX_ZOOM_LEVEL;
                         }
+
+                        // Zoom-to-cursor: adjust pan so the point under the
+                        // mouse stays fixed after the zoom change.
+                        let k = zoom_level / old_zoom;
+                        let win = window.inner_size();
+                        let cx = win.width as f32 / 2.0;
+                        let cy = win.height as f32 / 2.0;
+                        pan_offset.0 =
+                            (1.0 - k) * (last_mouse_pos.0 - cx) + k * pan_offset.0;
+                        pan_offset.1 =
+                            (1.0 - k) * (last_mouse_pos.1 - cy) + k * pan_offset.1;
 
                         // Debounce: record time, don't invalidate cache yet
                         last_zoom_time = Some(Instant::now());
@@ -344,17 +356,41 @@ fn main() {
                             }
                             Key::Character(c) => match c.as_str() {
                                 "+" | "=" => {
+                                    let old_zoom = zoom_level;
                                     zoom_level *= ZOOM_FACTOR;
                                     if zoom_level > MAX_ZOOM_LEVEL {
                                         zoom_level = MAX_ZOOM_LEVEL;
                                     }
+                                    // Zoom-to-cursor
+                                    let k = zoom_level / old_zoom;
+                                    let win = window.inner_size();
+                                    let cx = win.width as f32 / 2.0;
+                                    let cy = win.height as f32 / 2.0;
+                                    pan_offset.0 = (1.0 - k)
+                                        * (last_mouse_pos.0 - cx)
+                                        + k * pan_offset.0;
+                                    pan_offset.1 = (1.0 - k)
+                                        * (last_mouse_pos.1 - cy)
+                                        + k * pan_offset.1;
                                     needs_rerender = true;
                                 }
                                 "-" => {
+                                    let old_zoom = zoom_level;
                                     zoom_level /= ZOOM_FACTOR;
                                     if zoom_level < 0.1 {
                                         zoom_level = 0.1;
                                     }
+                                    // Zoom-to-cursor
+                                    let k = zoom_level / old_zoom;
+                                    let win = window.inner_size();
+                                    let cx = win.width as f32 / 2.0;
+                                    let cy = win.height as f32 / 2.0;
+                                    pan_offset.0 = (1.0 - k)
+                                        * (last_mouse_pos.0 - cx)
+                                        + k * pan_offset.0;
+                                    pan_offset.1 = (1.0 - k)
+                                        * (last_mouse_pos.1 - cy)
+                                        + k * pan_offset.1;
                                     needs_rerender = true;
                                 }
                                 "0" => {
