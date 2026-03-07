@@ -1,0 +1,13 @@
+[package]
+name = "rust-pdf-skia"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+winit = "0.29"
+glutin = "0.31"
+glutin-winit = "0.4"
+raw-window-handle = "0.5"
+skia-safe = { version = "0.75", features = ["gl"] }
+gl = "0.14"
+pdfium-render = "0.8"
