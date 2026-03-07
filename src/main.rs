@@ -9,7 +9,7 @@ use winit::event::{
 };
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
-use winit::window::WindowBuilder;
+use winit::window::{Icon, WindowBuilder};
 
 use raw_window_handle::{HasRawDisplayHandle, HasRawWindowHandle};
 
@@ -41,7 +41,7 @@ const SETTINGS_MENU_Y: f32 = 20.0;
 const SETTINGS_MENU_WIDTH: f32 = 280.0;
 const SETTINGS_HEADER_HEIGHT: f32 = 40.0;
 const SETTINGS_ROW_HEIGHT: f32 = 32.0;
-const SETTINGS_NUM_ITEMS: usize = 4;
+const SETTINGS_NUM_ITEMS: usize = 5;
 
 fn main() {
     // 1. Initialize PDFium
@@ -97,9 +97,13 @@ fn main() {
     let total_pages = document.pages().len();
 
     // 2. Setup Windowing
+    // Load app icon from assets/app_icon.ico (place your .ico file in the assets/ directory)
+    let window_icon = load_app_icon();
+
     let event_loop = EventLoop::new().unwrap();
     let window = WindowBuilder::new()
         .with_title("Rust Skia PDF Viewer")
+        .with_window_icon(window_icon)
         .build(&event_loop)
         .unwrap();
 
@@ -282,12 +286,14 @@ fn main() {
     // Zoom cache: (zoom_key, window_width, window_height, page_index, image, content_rect)
     let mut zoom_cache: Vec<(i32, u32, u32, u16, Image, Rect)> = Vec::new();
 
-    // Antialiasing settings
-    let mut text_smoothing = false;
+    // Antialiasing settings (FreeType text AA and RGB subpixel rendering enabled by default)
+    let mut text_smoothing = true;
     let mut path_smoothing = false;
     let mut image_smoothing = false;
     // Color management: force halftone for higher quality image stretching
     let mut force_halftone = false;
+    // RGB subpixel anti-aliasing for improved text readability
+    let mut lcd_text_rendering = true;
     let mut show_settings_menu = false;
 
     // 6. Run Loop
@@ -354,6 +360,10 @@ fn main() {
                                         }
                                         3 => {
                                             force_halftone = !force_halftone;
+                                            true
+                                        }
+                                        4 => {
+                                            lcd_text_rendering = !lcd_text_rendering;
                                             true
                                         }
                                         _ => false,
@@ -529,6 +539,15 @@ fn main() {
                                 "4" => {
                                     if show_settings_menu {
                                         force_halftone = !force_halftone;
+                                        cached_pdf_image = None;
+                                        zoom_cache.clear();
+                                        rendered_zoom = 0.0;
+                                        window.request_redraw();
+                                    }
+                                }
+                                "5" => {
+                                    if show_settings_menu {
+                                        lcd_text_rendering = !lcd_text_rendering;
                                         cached_pdf_image = None;
                                         zoom_cache.clear();
                                         rendered_zoom = 0.0;
@@ -732,7 +751,7 @@ fn main() {
                                 .use_print_quality(true)
                                 .render_annotations(true)
                                 .set_clear_color(PdfColor::new(255, 255, 255, 255))
-                                .use_lcd_text_rendering(false);
+                                .use_lcd_text_rendering(lcd_text_rendering);
 
                             if text_smoothing {
                                 render_config = render_config.set_text_smoothing(true);
@@ -848,6 +867,7 @@ fn main() {
                                 ("2  Path Smoothing", path_smoothing),
                                 ("3  Image Smoothing", image_smoothing),
                                 ("4  Force Halftone", force_halftone),
+                                ("5  Subpixel Text", lcd_text_rendering),
                             ];
                             let menu_height = SETTINGS_HEADER_HEIGHT
                                 + SETTINGS_ROW_HEIGHT * items.len() as f32
@@ -1145,4 +1165,45 @@ fn pdf_path_from_args() -> PathBuf {
         .nth(1)
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("test.pdf"))
+}
+
+/// Load the application icon from `assets/app_icon.ico`.
+///
+/// Place your `.ico` file at `assets/app_icon.ico` relative to the executable
+/// or the project root. Returns `None` if the icon file is not found or cannot
+/// be decoded, allowing the application to fall back to the OS default icon.
+fn load_app_icon() -> Option<Icon> {
+    let icon_paths = [
+        // Relative to the working directory (project root)
+        PathBuf::from("assets/app_icon.ico"),
+        // Relative to the executable location
+        env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.join("assets/app_icon.ico")))
+            .unwrap_or_default(),
+    ];
+
+    for icon_path in &icon_paths {
+        if !icon_path.exists() {
+            continue;
+        }
+
+        match image::open(icon_path) {
+            Ok(img) => {
+                let rgba = img.into_rgba8();
+                let (width, height) = (rgba.width(), rgba.height());
+                match Icon::from_rgba(rgba.into_raw(), width, height) {
+                    Ok(icon) => return Some(icon),
+                    Err(e) => {
+                        eprintln!("Warning: Failed to create window icon: {}", e);
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("Warning: Failed to load icon from {}: {}", icon_path.display(), e);
+            }
+        }
+    }
+
+    None
 }
