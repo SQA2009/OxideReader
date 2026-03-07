@@ -35,6 +35,14 @@ const ZOOM_TO_PERCENT: f32 = 77.4;
 const MAX_ZOOM_PERCENT: f32 = 6200.0;
 const MAX_ZOOM_LEVEL: f32 = MAX_ZOOM_PERCENT / ZOOM_TO_PERCENT;
 
+/// Layout constants for the antialiasing settings menu.
+const SETTINGS_MENU_X: f32 = 20.0;
+const SETTINGS_MENU_Y: f32 = 20.0;
+const SETTINGS_MENU_WIDTH: f32 = 280.0;
+const SETTINGS_HEADER_HEIGHT: f32 = 40.0;
+const SETTINGS_ROW_HEIGHT: f32 = 32.0;
+const SETTINGS_NUM_ITEMS: usize = 3;
+
 fn main() {
     // 1. Initialize PDFium
     let pdfium_bindings =
@@ -284,26 +292,23 @@ fn main() {
                     } => {
                         if state == ElementState::Pressed && show_settings_menu {
                             // Check if click is within the settings menu
-                            let menu_x = 20.0_f32;
-                            let menu_y = 20.0_f32;
-                            let menu_width = 280.0_f32;
-                            let header_height = 40.0_f32;
-                            let row_height = 32.0_f32;
-                            let num_items = 3;
-                            let menu_height =
-                                header_height + row_height * num_items as f32 + 10.0;
+                            let menu_height = SETTINGS_HEADER_HEIGHT
+                                + SETTINGS_ROW_HEIGHT * SETTINGS_NUM_ITEMS as f32
+                                + 10.0;
                             let (mx, my) = last_mouse_pos;
 
-                            if mx >= menu_x
-                                && mx <= menu_x + menu_width
-                                && my >= menu_y
-                                && my <= menu_y + menu_height
+                            if mx >= SETTINGS_MENU_X
+                                && mx <= SETTINGS_MENU_X + SETTINGS_MENU_WIDTH
+                                && my >= SETTINGS_MENU_Y
+                                && my <= SETTINGS_MENU_Y + menu_height
                             {
                                 // Determine which row was clicked
-                                let row_y_start = menu_y + header_height;
+                                let row_y_start =
+                                    SETTINGS_MENU_Y + SETTINGS_HEADER_HEIGHT;
                                 if my >= row_y_start {
-                                    let row_index =
-                                        ((my - row_y_start) / row_height) as usize;
+                                    let row_index = ((my - row_y_start)
+                                        / SETTINGS_ROW_HEIGHT)
+                                        as usize;
                                     let toggled = match row_index {
                                         0 => {
                                             text_smoothing = !text_smoothing;
@@ -788,18 +793,14 @@ fn main() {
 
                         // --- DRAW SETTINGS MENU ---
                         if show_settings_menu {
-                            let menu_x = 20.0_f32;
-                            let menu_y = 20.0_f32;
-                            let menu_width = 280.0_f32;
-                            let header_height = 40.0_f32;
-                            let row_height = 32.0_f32;
-                            let items: [(&str, bool); 3] = [
+                            let items: [(&str, bool); SETTINGS_NUM_ITEMS] = [
                                 ("1  Text Smoothing", text_smoothing),
                                 ("2  Path Smoothing", path_smoothing),
                                 ("3  Image Smoothing", image_smoothing),
                             ];
-                            let menu_height =
-                                header_height + row_height * items.len() as f32 + 10.0;
+                            let menu_height = SETTINGS_HEADER_HEIGHT
+                                + SETTINGS_ROW_HEIGHT * items.len() as f32
+                                + 10.0;
 
                             // Background
                             let mut menu_bg = Paint::new(
@@ -808,7 +809,12 @@ fn main() {
                             );
                             menu_bg.set_anti_alias(true);
                             canvas.draw_rect(
-                                Rect::from_xywh(menu_x, menu_y, menu_width, menu_height),
+                                Rect::from_xywh(
+                                    SETTINGS_MENU_X,
+                                    SETTINGS_MENU_Y,
+                                    SETTINGS_MENU_WIDTH,
+                                    menu_height,
+                                ),
                                 &menu_bg,
                             );
 
@@ -818,7 +824,10 @@ fn main() {
                             header_paint.set_anti_alias(true);
                             canvas.draw_str(
                                 "Antialiasing Settings",
-                                Point::new(menu_x + 10.0, menu_y + 28.0),
+                                Point::new(
+                                    SETTINGS_MENU_X + 10.0,
+                                    SETTINGS_MENU_Y + 28.0,
+                                ),
                                 &ui_font,
                                 &header_paint,
                             );
@@ -832,10 +841,13 @@ fn main() {
                             sep_paint.set_stroke_width(1.0);
                             sep_paint.set_style(skia_safe::PaintStyle::Stroke);
                             canvas.draw_line(
-                                Point::new(menu_x + 10.0, menu_y + header_height),
                                 Point::new(
-                                    menu_x + menu_width - 10.0,
-                                    menu_y + header_height,
+                                    SETTINGS_MENU_X + 10.0,
+                                    SETTINGS_MENU_Y + SETTINGS_HEADER_HEIGHT,
+                                ),
+                                Point::new(
+                                    SETTINGS_MENU_X + SETTINGS_MENU_WIDTH - 10.0,
+                                    SETTINGS_MENU_Y + SETTINGS_HEADER_HEIGHT,
                                 ),
                                 &sep_paint,
                             );
@@ -844,9 +856,9 @@ fn main() {
                             let small_font =
                                 Font::from_typeface(ui_font.typeface(), 18.0);
                             for (i, (label, enabled)) in items.iter().enumerate() {
-                                let iy = menu_y
-                                    + header_height
-                                    + row_height * i as f32
+                                let iy = SETTINGS_MENU_Y
+                                    + SETTINGS_HEADER_HEIGHT
+                                    + SETTINGS_ROW_HEIGHT * i as f32
                                     + 24.0;
                                 let status = if *enabled { "  ON" } else { "  OFF" };
                                 let item_text = format!("{}{}", label, status);
@@ -861,7 +873,7 @@ fn main() {
                                 item_paint.set_anti_alias(true);
                                 canvas.draw_str(
                                     &item_text,
-                                    Point::new(menu_x + 14.0, iy),
+                                    Point::new(SETTINGS_MENU_X + 14.0, iy),
                                     &small_font,
                                     &item_paint,
                                 );
