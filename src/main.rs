@@ -19,8 +19,8 @@ use ash::vk::{self as avk, Handle};
 use skia_safe::gpu::vk as skia_vk;
 use skia_safe::gpu::SurfaceOrigin;
 use skia_safe::{
-    font::Edging, AlphaType, Color, Color4f, ColorType, CubicResampler, Data, Font, FontHinting,
-    FontMgr, FontStyle, Image, ImageInfo, Paint, Point, Rect, SamplingOptions,
+    font::Edging, AlphaType, Color, Color4f, ColorSpace, ColorType, CubicResampler, Data, Font,
+    FontHinting, FontMgr, FontStyle, Image, ImageInfo, Paint, Point, Rect, SamplingOptions,
 };
 
 use pdfium_render::prelude::*;
@@ -41,7 +41,7 @@ const SETTINGS_MENU_Y: f32 = 20.0;
 const SETTINGS_MENU_WIDTH: f32 = 280.0;
 const SETTINGS_HEADER_HEIGHT: f32 = 40.0;
 const SETTINGS_ROW_HEIGHT: f32 = 32.0;
-const SETTINGS_NUM_ITEMS: usize = 3;
+const SETTINGS_NUM_ITEMS: usize = 4;
 
 fn main() {
     // 1. Initialize PDFium
@@ -283,9 +283,11 @@ fn main() {
     let mut zoom_cache: Vec<(i32, u32, u32, u16, Image, Rect)> = Vec::new();
 
     // Antialiasing settings
-    let mut text_smoothing = true;
-    let mut path_smoothing = true;
-    let mut image_smoothing = true;
+    let mut text_smoothing = false;
+    let mut path_smoothing = false;
+    let mut image_smoothing = false;
+    // Color management: force halftone for higher quality image stretching
+    let mut force_halftone = false;
     let mut show_settings_menu = false;
 
     // 6. Run Loop
@@ -348,6 +350,10 @@ fn main() {
                                         }
                                         2 => {
                                             image_smoothing = !image_smoothing;
+                                            true
+                                        }
+                                        3 => {
+                                            force_halftone = !force_halftone;
                                             true
                                         }
                                         _ => false,
@@ -520,6 +526,15 @@ fn main() {
                                         window.request_redraw();
                                     }
                                 }
+                                "4" => {
+                                    if show_settings_menu {
+                                        force_halftone = !force_halftone;
+                                        cached_pdf_image = None;
+                                        zoom_cache.clear();
+                                        rendered_zoom = 0.0;
+                                        window.request_redraw();
+                                    }
+                                }
                                 _ => {}
                             },
                             _ => {}
@@ -663,7 +678,7 @@ fn main() {
                                 &backend_render_target,
                                 SurfaceOrigin::TopLeft,
                                 ColorType::BGRA8888,
-                                None,
+                                ColorSpace::new_srgb(),
                                 None,
                             )
                             .expect("Failed to create Skia surface from Vulkan render target");
@@ -715,7 +730,9 @@ fn main() {
                                 .set_format(PdfBitmapFormat::BGRA)
                                 .set_reverse_byte_order(false)
                                 .use_print_quality(true)
-                                .render_annotations(true);
+                                .render_annotations(true)
+                                .set_clear_color(PdfColor::new(255, 255, 255, 255))
+                                .use_lcd_text_rendering(false);
 
                             if text_smoothing {
                                 render_config = render_config.set_text_smoothing(true);
@@ -726,6 +743,9 @@ fn main() {
                             if image_smoothing {
                                 render_config = render_config.set_image_smoothing(true);
                             }
+                            if force_halftone {
+                                render_config = render_config.force_half_tone(true);
+                            }
 
                             let bitmap = page
                                 .render_with_config(&render_config)
@@ -734,18 +754,19 @@ fn main() {
                             let image_info = ImageInfo::new(
                                 (texture_width, texture_height),
                                 ColorType::BGRA8888,
-                                AlphaType::Premul,
-                                None,
+                                AlphaType::Unpremul,
+                                ColorSpace::new_srgb(),
                             );
 
-                            let data = Data::new_copy(&bitmap.as_raw_bytes());
-                            let row_bytes = texture_width as usize * 4;
+                            let raw_bytes = bitmap.as_raw_bytes();
+                            let row_bytes = raw_bytes.len() / texture_height as usize;
+                            let data = Data::new_copy(&raw_bytes);
 
                             cached_pdf_image =
                                 skia_safe::images::raster_from_data(&image_info, data, row_bytes);
 
-                            let x = (size.width as f32 - final_width as f32) / 2.0;
-                            let y = (size.height as f32 - final_height as f32) / 2.0;
+                            let x = ((size.width as f32 - final_width as f32) / 2.0).floor();
+                            let y = ((size.height as f32 - final_height as f32) / 2.0).floor();
 
                             content_rect = Rect::from_xywh(
                                 x,
@@ -826,6 +847,7 @@ fn main() {
                                 ("1  Text Smoothing", text_smoothing),
                                 ("2  Path Smoothing", path_smoothing),
                                 ("3  Image Smoothing", image_smoothing),
+                                ("4  Force Halftone", force_halftone),
                             ];
                             let menu_height = SETTINGS_HEADER_HEIGHT
                                 + SETTINGS_ROW_HEIGHT * items.len() as f32
@@ -852,7 +874,7 @@ fn main() {
                                 Paint::new(Color4f::from(Color::WHITE), None);
                             header_paint.set_anti_alias(true);
                             canvas.draw_str(
-                                "Antialiasing Settings",
+                                "Render Settings",
                                 Point::new(
                                     SETTINGS_MENU_X + 10.0,
                                     SETTINGS_MENU_Y + 28.0,
