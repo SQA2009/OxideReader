@@ -9,7 +9,7 @@ use winit::event::{
 };
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
-use winit::window::WindowBuilder;
+use winit::window::{CursorIcon, WindowBuilder};
 
 use raw_window_handle::{HasRawDisplayHandle, HasRawWindowHandle};
 
@@ -42,6 +42,12 @@ const SETTINGS_MENU_WIDTH: f32 = 280.0;
 const SETTINGS_HEADER_HEIGHT: f32 = 40.0;
 const SETTINGS_ROW_HEIGHT: f32 = 32.0;
 const SETTINGS_NUM_ITEMS: usize = 4;
+
+#[derive(Clone, Copy, PartialEq)]
+enum ToolMode {
+    Hand,
+    Selection,
+}
 
 fn main() {
     // 1. Initialize PDFium
@@ -290,6 +296,9 @@ fn main() {
     let mut force_halftone = false;
     let mut show_settings_menu = false;
 
+    let mut current_tool = ToolMode::Hand;
+    window.set_cursor_icon(CursorIcon::Grab);
+
     // 6. Run Loop
     event_loop
         .run(move |event, target| {
@@ -366,11 +375,19 @@ fn main() {
                                     }
                                 }
                                 // Don't start dragging when clicking inside the menu
-                            } else {
+                            } else if current_tool == ToolMode::Hand {
                                 is_dragging = true;
+                                window.set_cursor_icon(CursorIcon::Grabbing);
+                            }
+                        } else if current_tool == ToolMode::Hand {
+                            is_dragging = state == ElementState::Pressed;
+                            if is_dragging {
+                                window.set_cursor_icon(CursorIcon::Grabbing);
+                            } else {
+                                window.set_cursor_icon(CursorIcon::Grab);
                             }
                         } else {
-                            is_dragging = state == ElementState::Pressed;
+                            is_dragging = false;
                         }
                     }
 
@@ -431,6 +448,7 @@ fn main() {
                             KeyEvent {
                                 logical_key,
                                 state: ElementState::Pressed,
+                                repeat,
                                 ..
                             },
                         ..
@@ -439,6 +457,22 @@ fn main() {
                         let mut page_changed = false;
 
                         match logical_key {
+                            Key::Named(NamedKey::Alt) if !repeat => {
+                                current_tool = match current_tool {
+                                    ToolMode::Hand => ToolMode::Selection,
+                                    ToolMode::Selection => ToolMode::Hand,
+                                };
+                                is_dragging = false;
+                                match current_tool {
+                                    ToolMode::Hand => {
+                                        window.set_cursor_icon(CursorIcon::Grab)
+                                    }
+                                    ToolMode::Selection => {
+                                        window.set_cursor_icon(CursorIcon::Default)
+                                    }
+                                }
+                                window.request_redraw();
+                            }
                             Key::Named(NamedKey::ArrowRight) => {
                                 if current_page_index < total_pages as u16 - 1 {
                                     current_page_index += 1;
@@ -960,6 +994,39 @@ fn main() {
                         canvas.draw_str(
                             &text,
                             Point::new(box_x + padding, box_y + 28.0),
+                            &ui_font,
+                            &text_paint,
+                        );
+
+                        // --- DRAW TOOL MODE INDICATOR ---
+                        let tool_text = match current_tool {
+                            ToolMode::Hand => "Hand Tool (Alt)",
+                            ToolMode::Selection => "Selection Tool (Alt)",
+                        };
+                        let (tool_text_width, _) =
+                            ui_font.measure_str(tool_text, Some(&text_paint));
+                        let tool_padding = 10.0;
+                        let tool_box_width = tool_text_width + (tool_padding * 2.0);
+                        let tool_box_height = 40.0;
+                        let tool_box_x = 20.0;
+                        let tool_box_y =
+                            size.height as f32 - tool_box_height - 20.0;
+
+                        canvas.draw_rect(
+                            Rect::from_xywh(
+                                tool_box_x,
+                                tool_box_y,
+                                tool_box_width,
+                                tool_box_height,
+                            ),
+                            &bg_paint,
+                        );
+                        canvas.draw_str(
+                            tool_text,
+                            Point::new(
+                                tool_box_x + tool_padding,
+                                tool_box_y + 28.0,
+                            ),
                             &ui_font,
                             &text_paint,
                         );
