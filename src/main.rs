@@ -20,28 +20,39 @@ use skia_safe::gpu::vk as skia_vk;
 use skia_safe::gpu::SurfaceOrigin;
 use skia_safe::{
     font::Edging, AlphaType, Color, Color4f, ColorSpace, ColorType, CubicResampler, Data, Font,
-    FontHinting, FontMgr, FontStyle, Image, ImageInfo, Paint, Point, Rect, SamplingOptions,
+    FontHinting, FontMgr, FontStyle, Image, ImageInfo, Paint, PathEffect, Point, Rect,
+    SamplingOptions,
 };
 
 use pdfium_render::prelude::*;
 
 const MAX_TEXTURE_SIZE: i32 = 16384;
 const ZOOM_DEBOUNCE_MS: u64 = 150;
-const ZOOM_CACHE_MAX_ENTRIES: usize = 5;
 const ZOOM_FACTOR: f32 = 1.10;
 /// Multiplier to convert internal zoom_level to displayed zoom percentage.
-/// At zoom_level=1.0 the page fits the window, which corresponds to ~77.4% of the PDF's native size.
+/// At zoom_level=1.0 the page fits the window width, which corresponds to ~77.4% of the PDF's native size.
 const ZOOM_TO_PERCENT: f32 = 77.4;
 const MAX_ZOOM_PERCENT: f32 = 6200.0;
 const MAX_ZOOM_LEVEL: f32 = MAX_ZOOM_PERCENT / ZOOM_TO_PERCENT;
 
+/// Layout constants
+const SIDEBAR_WIDTH: f32 = 200.0;
+const PAGE_GAP: f32 = 20.0;
+const SCROLL_SPEED: f32 = 60.0;
+
 /// Layout constants for the antialiasing settings menu.
-const SETTINGS_MENU_X: f32 = 20.0;
+const SETTINGS_MENU_X: f32 = SIDEBAR_WIDTH + 20.0;
 const SETTINGS_MENU_Y: f32 = 20.0;
 const SETTINGS_MENU_WIDTH: f32 = 280.0;
 const SETTINGS_HEADER_HEIGHT: f32 = 40.0;
 const SETTINGS_ROW_HEIGHT: f32 = 32.0;
 const SETTINGS_NUM_ITEMS: usize = 4;
+
+/// Sidebar zoom textbox layout
+const ZOOM_TEXTBOX_X: f32 = 10.0;
+const ZOOM_TEXTBOX_Y: f32 = 50.0;
+const ZOOM_TEXTBOX_W: f32 = SIDEBAR_WIDTH - 20.0;
+const ZOOM_TEXTBOX_H: f32 = 32.0;
 
 #[derive(Clone, Copy, PartialEq)]
 enum ToolMode {
@@ -101,6 +112,14 @@ fn main() {
         .expect("CRITICAL: Failed to open the PDF file.");
 
     let total_pages = document.pages().len();
+
+    // Pre-compute page sizes (width, height in points) for layout
+    let page_sizes: Vec<(f32, f32)> = (0..total_pages)
+        .map(|i| {
+            let page = document.pages().get(i as u16).unwrap();
+            (page.width().value, page.height().value)
+        })
+        .collect();
 
     // 2. Setup Windowing
     let event_loop = EventLoop::new().unwrap();
@@ -271,22 +290,21 @@ fn main() {
     ui_font.set_edging(Edging::SubpixelAntiAlias);
 
     // --- APP STATE ---
-    let mut cached_pdf_image: Option<Image> = None;
-    let mut current_page_index: u16 = 0;
+    // Per-page cached rendered images
+    let mut page_images: Vec<Option<Image>> = vec![None; total_pages as usize];
 
     let mut zoom_level: f32 = 1.0;
     let mut rendered_zoom: f32 = 0.0;
     let mut pan_offset = (0.0f32, 0.0f32);
-    let mut content_rect = Rect::default();
 
     let mut is_dragging = false;
     let mut last_mouse_pos = (0.0f32, 0.0f32);
+    // Anchor-point drag: record start position so the point under the cursor stays locked
+    let mut drag_start_mouse = (0.0f32, 0.0f32);
+    let mut drag_start_pan = (0.0f32, 0.0f32);
 
     // Debounced zoom state
     let mut last_zoom_time: Option<Instant> = None;
-
-    // Zoom cache: (zoom_key, window_width, window_height, page_index, image, content_rect)
-    let mut zoom_cache: Vec<(i32, u32, u32, u16, Image, Rect)> = Vec::new();
 
     // Antialiasing settings
     let mut text_smoothing = false;
@@ -297,6 +315,12 @@ fn main() {
     let mut show_settings_menu = false;
 
     let mut current_tool = ToolMode::Hand;
+    let mut ctrl_held = false;
+
+    // Sidebar zoom textbox state
+    let mut zoom_input_active = false;
+    let mut zoom_input_text = String::new();
+
     window.set_cursor_icon(CursorIcon::Grab);
 
     // 6. Run Loop
@@ -323,71 +347,100 @@ fn main() {
                 Event::WindowEvent { event, .. } => match event {
                     WindowEvent::CloseRequested => target.exit(),
 
+                    WindowEvent::ModifiersChanged(modifiers) => {
+                        ctrl_held = modifiers.state().control_key();
+                    }
+
                     // --- INPUT HANDLING ---
                     WindowEvent::MouseInput {
                         state,
                         button: MouseButton::Left,
                         ..
                     } => {
-                        if state == ElementState::Pressed && show_settings_menu {
-                            // Check if click is within the settings menu
-                            let menu_height = SETTINGS_HEADER_HEIGHT
-                                + SETTINGS_ROW_HEIGHT * SETTINGS_NUM_ITEMS as f32
-                                + 10.0;
-                            let (mx, my) = last_mouse_pos;
+                        let (mx, my) = last_mouse_pos;
 
-                            if mx >= SETTINGS_MENU_X
-                                && mx <= SETTINGS_MENU_X + SETTINGS_MENU_WIDTH
-                                && my >= SETTINGS_MENU_Y
-                                && my <= SETTINGS_MENU_Y + menu_height
+                        if state == ElementState::Pressed {
+                            // Check sidebar zoom textbox click
+                            if mx >= ZOOM_TEXTBOX_X
+                                && mx <= ZOOM_TEXTBOX_X + ZOOM_TEXTBOX_W
+                                && my >= ZOOM_TEXTBOX_Y
+                                && my <= ZOOM_TEXTBOX_Y + ZOOM_TEXTBOX_H
                             {
-                                // Determine which row was clicked
-                                let row_y_start =
-                                    SETTINGS_MENU_Y + SETTINGS_HEADER_HEIGHT;
-                                if my >= row_y_start {
-                                    let row_index = ((my - row_y_start)
-                                        / SETTINGS_ROW_HEIGHT)
-                                        as usize;
-                                    let toggled = match row_index {
-                                        0 => {
-                                            text_smoothing = !text_smoothing;
-                                            true
-                                        }
-                                        1 => {
-                                            path_smoothing = !path_smoothing;
-                                            true
-                                        }
-                                        2 => {
-                                            image_smoothing = !image_smoothing;
-                                            true
-                                        }
-                                        3 => {
-                                            force_halftone = !force_halftone;
-                                            true
-                                        }
-                                        _ => false,
-                                    };
-                                    if toggled {
-                                        cached_pdf_image = None;
-                                        zoom_cache.clear();
-                                        rendered_zoom = 0.0;
-                                        window.request_redraw();
-                                    }
+                                if !zoom_input_active {
+                                    zoom_input_active = true;
+                                    zoom_input_text =
+                                        format!("{:.1}", zoom_level * ZOOM_TO_PERCENT);
                                 }
-                                // Don't start dragging when clicking inside the menu
-                            } else if current_tool == ToolMode::Hand {
-                                is_dragging = true;
-                                window.set_cursor_icon(CursorIcon::Grabbing);
+                                window.request_redraw();
+                                return;
+                            } else if zoom_input_active {
+                                // Clicked outside textbox — deactivate
+                                zoom_input_active = false;
+                                window.request_redraw();
                             }
-                        } else if current_tool == ToolMode::Hand {
-                            is_dragging = state == ElementState::Pressed;
-                            if is_dragging {
+
+                            // Check if click is within the settings menu
+                            if show_settings_menu {
+                                let menu_height = SETTINGS_HEADER_HEIGHT
+                                    + SETTINGS_ROW_HEIGHT * SETTINGS_NUM_ITEMS as f32
+                                    + 10.0;
+
+                                if mx >= SETTINGS_MENU_X
+                                    && mx <= SETTINGS_MENU_X + SETTINGS_MENU_WIDTH
+                                    && my >= SETTINGS_MENU_Y
+                                    && my <= SETTINGS_MENU_Y + menu_height
+                                {
+                                    let row_y_start =
+                                        SETTINGS_MENU_Y + SETTINGS_HEADER_HEIGHT;
+                                    if my >= row_y_start {
+                                        let row_index = ((my - row_y_start)
+                                            / SETTINGS_ROW_HEIGHT)
+                                            as usize;
+                                        let toggled = match row_index {
+                                            0 => {
+                                                text_smoothing = !text_smoothing;
+                                                true
+                                            }
+                                            1 => {
+                                                path_smoothing = !path_smoothing;
+                                                true
+                                            }
+                                            2 => {
+                                                image_smoothing = !image_smoothing;
+                                                true
+                                            }
+                                            3 => {
+                                                force_halftone = !force_halftone;
+                                                true
+                                            }
+                                            _ => false,
+                                        };
+                                        if toggled {
+                                            page_images.iter_mut().for_each(|img| *img = None);
+                                            rendered_zoom = 0.0;
+                                            window.request_redraw();
+                                        }
+                                    }
+                                    // Don't start dragging when clicking inside the menu
+                                    return;
+                                }
+                            }
+
+                            // Only start drag in the viewport area (right of sidebar)
+                            if current_tool == ToolMode::Hand && mx >= SIDEBAR_WIDTH {
+                                is_dragging = true;
+                                drag_start_mouse = last_mouse_pos;
+                                drag_start_pan = pan_offset;
                                 window.set_cursor_icon(CursorIcon::Grabbing);
-                            } else {
-                                window.set_cursor_icon(CursorIcon::Grab);
                             }
                         } else {
-                            is_dragging = false;
+                            // Mouse released
+                            if is_dragging {
+                                is_dragging = false;
+                                if current_tool == ToolMode::Hand {
+                                    window.set_cursor_icon(CursorIcon::Grab);
+                                }
+                            }
                         }
                     }
 
@@ -396,51 +449,60 @@ fn main() {
                         let current_y = position.y as f32;
 
                         if is_dragging {
-                            let dx = current_x - last_mouse_pos.0;
-                            let dy = current_y - last_mouse_pos.1;
-                            pan_offset.0 += dx;
-                            pan_offset.1 += dy;
+                            // Anchor-point panning: always compute pan from the drag start
+                            // so the point under the cursor stays perfectly locked.
+                            pan_offset.0 =
+                                drag_start_pan.0 + (current_x - drag_start_mouse.0);
+                            pan_offset.1 =
+                                drag_start_pan.1 + (current_y - drag_start_mouse.1);
                             window.request_redraw();
                         }
                         last_mouse_pos = (current_x, current_y);
                     }
 
                     WindowEvent::MouseWheel { delta, .. } => {
-                        let scroll_y = match delta {
-                            MouseScrollDelta::LineDelta(_, y) => y,
-                            MouseScrollDelta::PixelDelta(pos) => pos.y as f32,
-                        };
+                        if ctrl_held {
+                            // Ctrl+scroll = zoom
+                            let scroll_y = match delta {
+                                MouseScrollDelta::LineDelta(_, y) => y,
+                                MouseScrollDelta::PixelDelta(pos) => pos.y as f32,
+                            };
 
-                        let old_zoom = zoom_level;
-                        if scroll_y > 0.0 {
-                            zoom_level *= ZOOM_FACTOR;
-                        } else if scroll_y < 0.0 {
-                            zoom_level /= ZOOM_FACTOR;
-                        }
-                        if zoom_level < 0.1 {
-                            zoom_level = 0.1;
-                        }
-                        if zoom_level > MAX_ZOOM_LEVEL {
-                            zoom_level = MAX_ZOOM_LEVEL;
-                        }
+                            let old_zoom = zoom_level;
+                            if scroll_y > 0.0 {
+                                zoom_level *= ZOOM_FACTOR;
+                            } else if scroll_y < 0.0 {
+                                zoom_level /= ZOOM_FACTOR;
+                            }
+                            zoom_level = zoom_level.clamp(0.1, MAX_ZOOM_LEVEL);
 
-                        // Zoom-to-cursor: adjust pan so the point under the
-                        // mouse stays fixed after the zoom change.
-                        let win = window.inner_size();
-                        zoom_to_cursor(
-                            old_zoom,
-                            zoom_level,
-                            last_mouse_pos,
-                            (win.width as f32, win.height as f32),
-                            &mut pan_offset,
-                        );
+                            // Zoom-to-cursor: adjust pan so the point under the
+                            // mouse stays fixed after the zoom change.
+                            let win = window.inner_size();
+                            let viewport_width = win.width as f32 - SIDEBAR_WIDTH;
+                            zoom_to_cursor(
+                                old_zoom,
+                                zoom_level,
+                                last_mouse_pos,
+                                (SIDEBAR_WIDTH + viewport_width / 2.0, 0.0),
+                                &mut pan_offset,
+                            );
 
-                        // Debounce: record time, don't invalidate cache yet
-                        last_zoom_time = Some(Instant::now());
-                        window.request_redraw();
-                        target.set_control_flow(ControlFlow::WaitUntil(
-                            Instant::now() + Duration::from_millis(ZOOM_DEBOUNCE_MS),
-                        ));
+                            // Debounce: record time, don't invalidate cache yet
+                            last_zoom_time = Some(Instant::now());
+                            window.request_redraw();
+                            target.set_control_flow(ControlFlow::WaitUntil(
+                                Instant::now() + Duration::from_millis(ZOOM_DEBOUNCE_MS),
+                            ));
+                        } else {
+                            // Plain scroll = pan vertically
+                            let scroll_amount = match delta {
+                                MouseScrollDelta::LineDelta(_, y) => y * SCROLL_SPEED,
+                                MouseScrollDelta::PixelDelta(pos) => pos.y as f32,
+                            };
+                            pan_offset.1 += scroll_amount;
+                            window.request_redraw();
+                        }
                     }
 
                     WindowEvent::KeyboardInput {
@@ -453,8 +515,52 @@ fn main() {
                             },
                         ..
                     } => {
+                        // Handle zoom textbox input first
+                        if zoom_input_active {
+                            match &logical_key {
+                                Key::Named(NamedKey::Enter) => {
+                                    // Apply zoom value
+                                    if let Ok(val) = zoom_input_text.parse::<f32>() {
+                                        let new_zoom = val / ZOOM_TO_PERCENT;
+                                        zoom_level = new_zoom.clamp(0.1, MAX_ZOOM_LEVEL);
+                                        page_images
+                                            .iter_mut()
+                                            .for_each(|img| *img = None);
+                                        rendered_zoom = zoom_level;
+                                        last_zoom_time = None;
+                                    }
+                                    zoom_input_active = false;
+                                    window.request_redraw();
+                                    return;
+                                }
+                                Key::Named(NamedKey::Escape) => {
+                                    zoom_input_active = false;
+                                    window.request_redraw();
+                                    return;
+                                }
+                                Key::Named(NamedKey::Backspace) => {
+                                    zoom_input_text.pop();
+                                    window.request_redraw();
+                                    return;
+                                }
+                                Key::Character(c) => {
+                                    let c_str = c.as_str();
+                                    if c_str
+                                        .chars()
+                                        .all(|ch| ch.is_ascii_digit() || ch == '.')
+                                    {
+                                        zoom_input_text.push_str(c_str);
+                                        window.request_redraw();
+                                    }
+                                    return;
+                                }
+                                _ => {
+                                    return;
+                                }
+                            }
+                        }
+
                         let mut needs_rerender = false;
-                        let mut page_changed = false;
 
                         match logical_key {
                             Key::Named(NamedKey::Alt) if !repeat => {
@@ -473,33 +579,18 @@ fn main() {
                                 }
                                 window.request_redraw();
                             }
-                            Key::Named(NamedKey::ArrowRight) => {
-                                if current_page_index < total_pages as u16 - 1 {
-                                    current_page_index += 1;
-                                    pan_offset = (0.0, 0.0);
-                                    page_changed = true;
-                                }
-                            }
-                            Key::Named(NamedKey::ArrowLeft) => {
-                                if current_page_index > 0 {
-                                    current_page_index -= 1;
-                                    pan_offset = (0.0, 0.0);
-                                    page_changed = true;
-                                }
-                            }
                             Key::Character(c) => match c.as_str() {
                                 "+" | "=" => {
                                     let old_zoom = zoom_level;
                                     zoom_level *= ZOOM_FACTOR;
-                                    if zoom_level > MAX_ZOOM_LEVEL {
-                                        zoom_level = MAX_ZOOM_LEVEL;
-                                    }
+                                    zoom_level = zoom_level.clamp(0.1, MAX_ZOOM_LEVEL);
                                     let win = window.inner_size();
+                                    let viewport_width = win.width as f32 - SIDEBAR_WIDTH;
                                     zoom_to_cursor(
                                         old_zoom,
                                         zoom_level,
                                         last_mouse_pos,
-                                        (win.width as f32, win.height as f32),
+                                        (SIDEBAR_WIDTH + viewport_width / 2.0, 0.0),
                                         &mut pan_offset,
                                     );
                                     needs_rerender = true;
@@ -507,15 +598,14 @@ fn main() {
                                 "-" => {
                                     let old_zoom = zoom_level;
                                     zoom_level /= ZOOM_FACTOR;
-                                    if zoom_level < 0.1 {
-                                        zoom_level = 0.1;
-                                    }
+                                    zoom_level = zoom_level.clamp(0.1, MAX_ZOOM_LEVEL);
                                     let win = window.inner_size();
+                                    let viewport_width = win.width as f32 - SIDEBAR_WIDTH;
                                     zoom_to_cursor(
                                         old_zoom,
                                         zoom_level,
                                         last_mouse_pos,
-                                        (win.width as f32, win.height as f32),
+                                        (SIDEBAR_WIDTH + viewport_width / 2.0, 0.0),
                                         &mut pan_offset,
                                     );
                                     needs_rerender = true;
@@ -523,10 +613,9 @@ fn main() {
                                 "0" => {
                                     zoom_level = 1.0;
                                     pan_offset = (0.0, 0.0);
-                                    cached_pdf_image = None;
+                                    page_images.iter_mut().for_each(|img| *img = None);
                                     rendered_zoom = zoom_level;
                                     last_zoom_time = None;
-                                    zoom_cache.clear();
                                     window.request_redraw();
                                 }
                                 "s" | "S" => {
@@ -536,8 +625,7 @@ fn main() {
                                 "1" => {
                                     if show_settings_menu {
                                         text_smoothing = !text_smoothing;
-                                        cached_pdf_image = None;
-                                        zoom_cache.clear();
+                                        page_images.iter_mut().for_each(|img| *img = None);
                                         rendered_zoom = 0.0;
                                         window.request_redraw();
                                     }
@@ -545,8 +633,7 @@ fn main() {
                                 "2" => {
                                     if show_settings_menu {
                                         path_smoothing = !path_smoothing;
-                                        cached_pdf_image = None;
-                                        zoom_cache.clear();
+                                        page_images.iter_mut().for_each(|img| *img = None);
                                         rendered_zoom = 0.0;
                                         window.request_redraw();
                                     }
@@ -554,8 +641,7 @@ fn main() {
                                 "3" => {
                                     if show_settings_menu {
                                         image_smoothing = !image_smoothing;
-                                        cached_pdf_image = None;
-                                        zoom_cache.clear();
+                                        page_images.iter_mut().for_each(|img| *img = None);
                                         rendered_zoom = 0.0;
                                         window.request_redraw();
                                     }
@@ -563,8 +649,7 @@ fn main() {
                                 "4" => {
                                     if show_settings_menu {
                                         force_halftone = !force_halftone;
-                                        cached_pdf_image = None;
-                                        zoom_cache.clear();
+                                        page_images.iter_mut().for_each(|img| *img = None);
                                         rendered_zoom = 0.0;
                                         window.request_redraw();
                                     }
@@ -574,12 +659,7 @@ fn main() {
                             _ => {}
                         }
 
-                        if page_changed {
-                            cached_pdf_image = None;
-                            zoom_cache.clear();
-                            rendered_zoom = 0.0;
-                            window.request_redraw();
-                        } else if needs_rerender {
+                        if needs_rerender {
                             last_zoom_time = Some(Instant::now());
                             window.request_redraw();
                             target.set_control_flow(ControlFlow::WaitUntil(
@@ -599,8 +679,7 @@ fn main() {
                                 &window,
                                 Some(swapchain_state.swapchain),
                             );
-                            cached_pdf_image = None;
-                            zoom_cache.clear();
+                            page_images.iter_mut().for_each(|img| *img = None);
                             rendered_zoom = 0.0;
                         }
                         window.request_redraw();
@@ -612,36 +691,26 @@ fn main() {
                             return;
                         }
 
+                        let viewport_width =
+                            (size.width as f32 - SIDEBAR_WIDTH).max(1.0);
+                        let viewport_height = size.height as f32;
+
                         // --- DEBOUNCED ZOOM LOGIC ---
-                        // Check if zoom has settled after debounce period
                         if zoom_level != rendered_zoom {
                             if let Some(last_time) = last_zoom_time {
                                 if last_time.elapsed()
                                     >= Duration::from_millis(ZOOM_DEBOUNCE_MS)
                                 {
-                                    // Debounce settled - check cache or trigger full render
-                                    let zoom_key = (zoom_level * 1000.0).round() as i32;
-                                    if let Some(entry) = zoom_cache.iter().find(
-                                        |(k, w, h, p, _, _)| {
-                                            *k == zoom_key
-                                                && *w == size.width
-                                                && *h == size.height
-                                                && *p == current_page_index
-                                        },
-                                    ) {
-                                        cached_pdf_image = Some(entry.4.clone());
-                                        content_rect = entry.5;
-                                    } else {
-                                        cached_pdf_image = None;
-                                    }
+                                    // Debounce settled - clear caches and re-render
+                                    page_images
+                                        .iter_mut()
+                                        .for_each(|img| *img = None);
                                     rendered_zoom = zoom_level;
                                     last_zoom_time = None;
-                                }
-                                // else: still zooming rapidly, show scaled preview
-                                // Ensure we wake up after the debounce period to re-render
-                                else {
+                                } else {
                                     target.set_control_flow(ControlFlow::WaitUntil(
-                                        last_time + Duration::from_millis(ZOOM_DEBOUNCE_MS),
+                                        last_time
+                                            + Duration::from_millis(ZOOM_DEBOUNCE_MS),
                                     ));
                                 }
                             }
@@ -660,7 +729,6 @@ fn main() {
                         let image_index = match acquire_result {
                             Ok((index, _)) => index,
                             Err(avk::Result::ERROR_OUT_OF_DATE_KHR) => {
-                                // Swapchain needs recreation
                                 unsafe { device.device_wait_idle().unwrap() };
                                 swapchain_state = create_swapchain(
                                     &surface_loader,
@@ -670,16 +738,20 @@ fn main() {
                                     &window,
                                     Some(swapchain_state.swapchain),
                                 );
-                                cached_pdf_image = None;
-                                zoom_cache.clear();
+                                page_images
+                                    .iter_mut()
+                                    .for_each(|img| *img = None);
                                 rendered_zoom = 0.0;
                                 window.request_redraw();
                                 return;
                             }
-                            Err(e) => panic!("Failed to acquire swapchain image: {:?}", e),
+                            Err(e) => {
+                                panic!("Failed to acquire swapchain image: {:?}", e)
+                            }
                         };
 
-                        let swapchain_image = swapchain_state.images[image_index as usize];
+                        let swapchain_image =
+                            swapchain_state.images[image_index as usize];
 
                         // Create Skia surface from swapchain image
                         let vk_image_info = unsafe {
@@ -715,124 +787,133 @@ fn main() {
                                 ColorSpace::new_srgb(),
                                 None,
                             )
-                            .expect("Failed to create Skia surface from Vulkan render target");
+                            .expect(
+                                "Failed to create Skia surface from Vulkan render target",
+                            );
 
-                        // --- RENDER PDF ---
-                        if cached_pdf_image.is_none() {
-                            let page = document
-                                .pages()
-                                .get(current_page_index)
-                                .expect("Error loading page");
+                        // --- COMPUTE PAGE LAYOUTS ---
+                        // Each page is fit to viewport_width at zoom_level.
+                        // page_layouts: (y_offset, display_width, display_height)
+                        let mut page_layouts: Vec<(f32, f32, f32)> = Vec::new();
+                        {
+                            let mut y_cursor = 0.0f32;
+                            for &(pw, ph) in &page_sizes {
+                                let aspect = pw / ph;
+                                let display_width = viewport_width * zoom_level;
+                                let display_height = display_width / aspect;
+                                page_layouts.push((y_cursor, display_width, display_height));
+                                y_cursor += display_height + PAGE_GAP;
+                            }
+                        }
 
-                            let page_width_pts = page.width().value;
-                            let page_height_pts = page.height().value;
-                            let aspect_ratio = page_width_pts / page_height_pts;
-                            let window_ratio = size.width as f32 / size.height as f32;
-
-                            let (fit_width, fit_height) = if window_ratio > aspect_ratio {
-                                let h = size.height as f32;
-                                let w = h * aspect_ratio;
-                                (w, h)
-                            } else {
-                                let w = size.width as f32;
-                                let h = w / aspect_ratio;
-                                (w, h)
-                            };
-
-                            let final_width = (fit_width * zoom_level).round() as i32;
-                            let final_height = (fit_height * zoom_level).round() as i32;
-
-                            let mut texture_width = final_width;
-                            let mut texture_height = final_height;
-
-                            if texture_width > MAX_TEXTURE_SIZE
-                                || texture_height > MAX_TEXTURE_SIZE
+                        // --- RENDER VISIBLE PAGES ---
+                        // Only render pages when not in the middle of a zoom debounce
+                        let is_debouncing = last_zoom_time.is_some();
+                        if !is_debouncing {
+                            for (i, &(page_y, _, _)) in
+                                page_layouts.iter().enumerate()
                             {
-                                let scale = if texture_width > texture_height {
-                                    MAX_TEXTURE_SIZE as f32 / texture_width as f32
-                                } else {
-                                    MAX_TEXTURE_SIZE as f32 / texture_height as f32
-                                };
-                                texture_width = (texture_width as f32 * scale) as i32;
-                                texture_height = (texture_height as f32 * scale) as i32;
-                            }
+                                let (pw, ph) = page_sizes[i];
+                                let aspect = pw / ph;
+                                let render_width =
+                                    (viewport_width * zoom_level).round() as i32;
+                                let render_height =
+                                    (render_width as f32 / aspect).round() as i32;
 
-                            // Anti-aliasing: smooth strokes, enhance fine lines, smooth images
-                            let mut render_config = PdfRenderConfig::new()
-                                .set_target_width(texture_width)
-                                .set_target_height(texture_height)
-                                .set_format(PdfBitmapFormat::BGRA)
-                                .set_reverse_byte_order(false)
-                                .use_print_quality(true)
-                                .render_annotations(true)
-                                .set_clear_color(PdfColor::new(255, 255, 255, 255))
-                                .use_lcd_text_rendering(false);
-
-                            if text_smoothing {
-                                render_config = render_config.set_text_smoothing(true);
-                            }
-                            if path_smoothing {
-                                render_config = render_config.set_path_smoothing(true);
-                            }
-                            if image_smoothing {
-                                render_config = render_config.set_image_smoothing(true);
-                            }
-                            if force_halftone {
-                                render_config = render_config.force_half_tone(true);
-                            }
-
-                            let bitmap = page
-                                .render_with_config(&render_config)
-                                .expect("Failed to render page");
-
-                            let image_info = ImageInfo::new(
-                                (texture_width, texture_height),
-                                ColorType::BGRA8888,
-                                AlphaType::Unpremul,
-                                ColorSpace::new_srgb(),
-                            );
-
-                            let raw_bytes = bitmap.as_raw_bytes();
-                            let row_bytes = raw_bytes.len() / texture_height as usize;
-                            let data = Data::new_copy(&raw_bytes);
-
-                            cached_pdf_image =
-                                skia_safe::images::raster_from_data(&image_info, data, row_bytes);
-
-                            let x = ((size.width as f32 - final_width as f32) / 2.0).floor();
-                            let y = ((size.height as f32 - final_height as f32) / 2.0).floor();
-
-                            content_rect = Rect::from_xywh(
-                                x,
-                                y,
-                                final_width as f32,
-                                final_height as f32,
-                            );
-
-                            // Store in zoom cache
-                            if let Some(ref image) = cached_pdf_image {
-                                let zoom_key = (zoom_level * 1000.0).round() as i32;
-                                // Remove old entry with same key if present
-                                zoom_cache.retain(|(k, w, h, p, _, _)| {
-                                    !(*k == zoom_key
-                                        && *w == size.width
-                                        && *h == size.height
-                                        && *p == current_page_index)
-                                });
-                                if zoom_cache.len() >= ZOOM_CACHE_MAX_ENTRIES {
-                                    zoom_cache.remove(0);
+                                // Check visibility
+                                let screen_y = page_y + pan_offset.1;
+                                let screen_bottom = screen_y + render_height as f32;
+                                if screen_bottom < -100.0
+                                    || screen_y > viewport_height + 100.0
+                                {
+                                    continue;
                                 }
-                                zoom_cache.push((
-                                    zoom_key,
-                                    size.width,
-                                    size.height,
-                                    current_page_index,
-                                    image.clone(),
-                                    content_rect,
-                                ));
+
+                                if page_images[i].is_some() {
+                                    continue;
+                                }
+
+                                let mut texture_width = render_width;
+                                let mut texture_height = render_height;
+
+                                if texture_width > MAX_TEXTURE_SIZE
+                                    || texture_height > MAX_TEXTURE_SIZE
+                                {
+                                    let scale =
+                                        if texture_width > texture_height {
+                                            MAX_TEXTURE_SIZE as f32
+                                                / texture_width as f32
+                                        } else {
+                                            MAX_TEXTURE_SIZE as f32
+                                                / texture_height as f32
+                                        };
+                                    texture_width =
+                                        (texture_width as f32 * scale) as i32;
+                                    texture_height =
+                                        (texture_height as f32 * scale) as i32;
+                                }
+
+                                if texture_width <= 0 || texture_height <= 0 {
+                                    continue;
+                                }
+
+                                let page = document
+                                    .pages()
+                                    .get(i as u16)
+                                    .expect("Error loading page");
+
+                                let mut render_config = PdfRenderConfig::new()
+                                    .set_target_width(texture_width)
+                                    .set_target_height(texture_height)
+                                    .set_format(PdfBitmapFormat::BGRA)
+                                    .set_reverse_byte_order(false)
+                                    .use_print_quality(true)
+                                    .render_annotations(true)
+                                    .set_clear_color(PdfColor::new(
+                                        255, 255, 255, 255,
+                                    ))
+                                    .use_lcd_text_rendering(false);
+
+                                if text_smoothing {
+                                    render_config =
+                                        render_config.set_text_smoothing(true);
+                                }
+                                if path_smoothing {
+                                    render_config =
+                                        render_config.set_path_smoothing(true);
+                                }
+                                if image_smoothing {
+                                    render_config =
+                                        render_config.set_image_smoothing(true);
+                                }
+                                if force_halftone {
+                                    render_config =
+                                        render_config.force_half_tone(true);
+                                }
+
+                                let bitmap = page
+                                    .render_with_config(&render_config)
+                                    .expect("Failed to render page");
+
+                                let image_info = ImageInfo::new(
+                                    (texture_width, texture_height),
+                                    ColorType::BGRA8888,
+                                    AlphaType::Unpremul,
+                                    ColorSpace::new_srgb(),
+                                );
+
+                                let raw_bytes = bitmap.as_raw_bytes();
+                                let row_bytes =
+                                    raw_bytes.len() / texture_height as usize;
+                                let data = Data::new_copy(&raw_bytes);
+
+                                page_images[i] =
+                                    skia_safe::images::raster_from_data(
+                                        &image_info, data, row_bytes,
+                                    );
                             }
 
-                            // Sync rendered_zoom so debounce logic knows this level is current
+                            // Sync rendered_zoom
                             rendered_zoom = zoom_level;
                         }
 
@@ -840,40 +921,234 @@ fn main() {
                         let canvas = skia_surface.canvas();
                         canvas.clear(Color::from_rgb(30, 30, 30));
 
-                        if let Some(image) = &cached_pdf_image {
-                            // During debounced zoom, scale the cached image as a preview
-                            let display_rect =
-                                if last_zoom_time.is_some() && rendered_zoom > 0.0 {
-                                    let zoom_scale = zoom_level / rendered_zoom;
-                                    let preview_width = content_rect.width() * zoom_scale;
-                                    let preview_height = content_rect.height() * zoom_scale;
-                                    let preview_x =
-                                        (size.width as f32 - preview_width) / 2.0;
-                                    let preview_y =
-                                        (size.height as f32 - preview_height) / 2.0;
-                                    Rect::from_xywh(
-                                        preview_x + pan_offset.0,
-                                        preview_y + pan_offset.1,
-                                        preview_width,
-                                        preview_height,
-                                    )
-                                } else {
-                                    Rect::from_xywh(
-                                        content_rect.x() + pan_offset.0,
-                                        content_rect.y() + pan_offset.1,
-                                        content_rect.width(),
-                                        content_rect.height(),
-                                    )
-                                };
+                        // Clip to viewport area (right of sidebar)
+                        canvas.save();
+                        canvas.clip_rect(
+                            Rect::from_xywh(
+                                SIDEBAR_WIDTH,
+                                0.0,
+                                viewport_width,
+                                viewport_height,
+                            ),
+                            None,
+                            false,
+                        );
 
-                            // High-quality image scaling with CatmullRom cubic resampler
-                            let sampling =
-                                SamplingOptions::from(CubicResampler::catmull_rom());
-                            let paint = Paint::default();
-                            canvas.draw_image_rect_with_sampling_options(
-                                image, None, display_rect, sampling, &paint,
+                        // Draw pages
+                        let sampling =
+                            SamplingOptions::from(CubicResampler::catmull_rom());
+                        let paint = Paint::default();
+
+                        for (i, &(page_y, page_w, page_h)) in
+                            page_layouts.iter().enumerate()
+                        {
+                            let screen_x = SIDEBAR_WIDTH
+                                + (viewport_width - page_w) / 2.0
+                                + pan_offset.0;
+                            let screen_y = page_y + pan_offset.1;
+
+                            // Skip if not visible
+                            if screen_y + page_h < 0.0
+                                || screen_y > viewport_height
+                            {
+                                continue;
+                            }
+
+                            let display_rect = Rect::from_xywh(
+                                screen_x, screen_y, page_w, page_h,
                             );
+
+                            if let Some(image) = &page_images[i] {
+                                canvas
+                                    .draw_image_rect_with_sampling_options(
+                                        image,
+                                        None,
+                                        display_rect,
+                                        sampling,
+                                        &paint,
+                                    );
+                            }
                         }
+
+                        // Draw dashed separators between pages
+                        let intervals = [8.0f32, 6.0];
+                        if let Some(dash_effect) =
+                            PathEffect::dash(&intervals, 0.0)
+                        {
+                            let mut dash_paint = Paint::new(
+                                Color4f::from(Color::from_argb(
+                                    150, 180, 180, 180,
+                                )),
+                                None,
+                            );
+                            dash_paint
+                                .set_style(skia_safe::PaintStyle::Stroke);
+                            dash_paint.set_stroke_width(1.0);
+                            dash_paint.set_path_effect(dash_effect);
+
+                            for i in 0..page_layouts.len().saturating_sub(1) {
+                                let (pg_y, _, pg_h) = page_layouts[i];
+                                let line_y =
+                                    pg_y + pg_h + PAGE_GAP / 2.0 + pan_offset.1;
+                                if line_y >= 0.0 && line_y <= viewport_height {
+                                    canvas.draw_line(
+                                        Point::new(SIDEBAR_WIDTH + 10.0, line_y),
+                                        Point::new(
+                                            size.width as f32 - 10.0,
+                                            line_y,
+                                        ),
+                                        &dash_paint,
+                                    );
+                                }
+                            }
+                        }
+
+                        canvas.restore(); // Restore viewport clip
+
+                        // --- DRAW SIDEBAR ---
+                        let mut sidebar_bg = Paint::new(
+                            Color4f::from(Color::from_argb(240, 35, 35, 35)),
+                            None,
+                        );
+                        sidebar_bg.set_anti_alias(true);
+                        canvas.draw_rect(
+                            Rect::from_xywh(
+                                0.0,
+                                0.0,
+                                SIDEBAR_WIDTH,
+                                viewport_height,
+                            ),
+                            &sidebar_bg,
+                        );
+
+                        // Sidebar separator line
+                        let mut sidebar_sep = Paint::new(
+                            Color4f::from(Color::from_argb(100, 80, 80, 80)),
+                            None,
+                        );
+                        sidebar_sep.set_style(skia_safe::PaintStyle::Stroke);
+                        sidebar_sep.set_stroke_width(1.0);
+                        canvas.draw_line(
+                            Point::new(SIDEBAR_WIDTH, 0.0),
+                            Point::new(SIDEBAR_WIDTH, viewport_height),
+                            &sidebar_sep,
+                        );
+
+                        // Zoom label
+                        let small_font =
+                            Font::from_typeface(ui_font.typeface(), 16.0);
+                        let mut white_paint =
+                            Paint::new(Color4f::from(Color::WHITE), None);
+                        white_paint.set_anti_alias(true);
+                        canvas.draw_str(
+                            "Zoom",
+                            Point::new(15.0, 40.0),
+                            &small_font,
+                            &white_paint,
+                        );
+
+                        // Zoom textbox
+                        let textbox_rect = Rect::from_xywh(
+                            ZOOM_TEXTBOX_X,
+                            ZOOM_TEXTBOX_Y,
+                            ZOOM_TEXTBOX_W,
+                            ZOOM_TEXTBOX_H,
+                        );
+                        let textbox_bg_color = if zoom_input_active {
+                            Color::from_rgb(55, 55, 55)
+                        } else {
+                            Color::from_rgb(45, 45, 45)
+                        };
+                        let textbox_bg = Paint::new(
+                            Color4f::from(textbox_bg_color),
+                            None,
+                        );
+                        canvas.draw_rect(textbox_rect, &textbox_bg);
+
+                        let border_color = if zoom_input_active {
+                            Color::from_rgb(100, 150, 255)
+                        } else {
+                            Color::from_rgb(80, 80, 80)
+                        };
+                        let mut border_paint = Paint::new(
+                            Color4f::from(border_color),
+                            None,
+                        );
+                        border_paint
+                            .set_style(skia_safe::PaintStyle::Stroke);
+                        border_paint.set_stroke_width(1.0);
+                        border_paint.set_anti_alias(true);
+                        canvas.draw_rect(textbox_rect, &border_paint);
+
+                        let zoom_display_text = if zoom_input_active {
+                            format!("{}%", zoom_input_text)
+                        } else {
+                            format!(
+                                "{:.1}%",
+                                zoom_level * ZOOM_TO_PERCENT
+                            )
+                        };
+                        canvas.draw_str(
+                            &zoom_display_text,
+                            Point::new(
+                                ZOOM_TEXTBOX_X + 8.0,
+                                ZOOM_TEXTBOX_Y + 22.0,
+                            ),
+                            &small_font,
+                            &white_paint,
+                        );
+
+                        // Tool mode indicator in sidebar
+                        let tool_text = match current_tool {
+                            ToolMode::Hand => "Hand Tool",
+                            ToolMode::Selection => "Select Tool",
+                        };
+                        canvas.draw_str(
+                            tool_text,
+                            Point::new(15.0, 110.0),
+                            &small_font,
+                            &white_paint,
+                        );
+
+                        let shortcut_font =
+                            Font::from_typeface(ui_font.typeface(), 12.0);
+                        let mut dim_paint = Paint::new(
+                            Color4f::from(Color::from_argb(
+                                150, 180, 180, 180,
+                            )),
+                            None,
+                        );
+                        dim_paint.set_anti_alias(true);
+                        canvas.draw_str(
+                            "(Alt to switch)",
+                            Point::new(15.0, 128.0),
+                            &shortcut_font,
+                            &dim_paint,
+                        );
+
+                        // Page count in sidebar
+                        let page_info =
+                            format!("{} pages", total_pages);
+                        canvas.draw_str(
+                            &page_info,
+                            Point::new(15.0, 160.0),
+                            &small_font,
+                            &dim_paint,
+                        );
+
+                        // Scroll hint
+                        canvas.draw_str(
+                            "Scroll: navigate",
+                            Point::new(15.0, 190.0),
+                            &shortcut_font,
+                            &dim_paint,
+                        );
+                        canvas.draw_str(
+                            "Ctrl+Scroll: zoom",
+                            Point::new(15.0, 208.0),
+                            &shortcut_font,
+                            &dim_paint,
+                        );
 
                         // --- DRAW SETTINGS MENU ---
                         if show_settings_menu {
@@ -889,7 +1164,9 @@ fn main() {
 
                             // Background
                             let mut menu_bg = Paint::new(
-                                Color4f::from(Color::from_argb(210, 25, 25, 25)),
+                                Color4f::from(Color::from_argb(
+                                    210, 25, 25, 25,
+                                )),
                                 None,
                             );
                             menu_bg.set_anti_alias(true);
@@ -904,8 +1181,10 @@ fn main() {
                             );
 
                             // Header
-                            let mut header_paint =
-                                Paint::new(Color4f::from(Color::WHITE), None);
+                            let mut header_paint = Paint::new(
+                                Color4f::from(Color::WHITE),
+                                None,
+                            );
                             header_paint.set_anti_alias(true);
                             canvas.draw_str(
                                 "Render Settings",
@@ -918,124 +1197,71 @@ fn main() {
                             );
 
                             // Separator line
-                            let mut sep_paint = Paint::new(
-                                Color4f::from(Color::from_argb(100, 255, 255, 255)),
+                            let mut menu_sep = Paint::new(
+                                Color4f::from(Color::from_argb(
+                                    100, 255, 255, 255,
+                                )),
                                 None,
                             );
-                            sep_paint.set_anti_alias(true);
-                            sep_paint.set_stroke_width(1.0);
-                            sep_paint.set_style(skia_safe::PaintStyle::Stroke);
+                            menu_sep.set_anti_alias(true);
+                            menu_sep.set_stroke_width(1.0);
+                            menu_sep
+                                .set_style(skia_safe::PaintStyle::Stroke);
                             canvas.draw_line(
                                 Point::new(
                                     SETTINGS_MENU_X + 10.0,
                                     SETTINGS_MENU_Y + SETTINGS_HEADER_HEIGHT,
                                 ),
                                 Point::new(
-                                    SETTINGS_MENU_X + SETTINGS_MENU_WIDTH - 10.0,
+                                    SETTINGS_MENU_X + SETTINGS_MENU_WIDTH
+                                        - 10.0,
                                     SETTINGS_MENU_Y + SETTINGS_HEADER_HEIGHT,
                                 ),
-                                &sep_paint,
+                                &menu_sep,
                             );
 
                             // Items
-                            let small_font =
-                                Font::from_typeface(ui_font.typeface(), 18.0);
-                            for (i, (label, enabled)) in items.iter().enumerate() {
+                            let menu_item_font = Font::from_typeface(
+                                ui_font.typeface(),
+                                18.0,
+                            );
+                            for (i, (label, enabled)) in
+                                items.iter().enumerate()
+                            {
                                 let iy = SETTINGS_MENU_Y
                                     + SETTINGS_HEADER_HEIGHT
                                     + SETTINGS_ROW_HEIGHT * i as f32
                                     + 24.0;
-                                let status = if *enabled { "  ON" } else { "  OFF" };
-                                let item_text = format!("{}{}", label, status);
+                                let status = if *enabled {
+                                    "  ON"
+                                } else {
+                                    "  OFF"
+                                };
+                                let item_text =
+                                    format!("{}{}", label, status);
 
                                 let color = if *enabled {
                                     Color::from_rgb(100, 220, 100)
                                 } else {
                                     Color::from_rgb(180, 80, 80)
                                 };
-                                let mut item_paint =
-                                    Paint::new(Color4f::from(color), None);
+                                let mut item_paint = Paint::new(
+                                    Color4f::from(color),
+                                    None,
+                                );
                                 item_paint.set_anti_alias(true);
                                 canvas.draw_str(
                                     &item_text,
                                     Point::new(SETTINGS_MENU_X + 14.0, iy),
-                                    &small_font,
+                                    &menu_item_font,
                                     &item_paint,
                                 );
                             }
                         }
 
-                        // --- DRAW ZOOM PERCENTAGE ---
-                        let real_zoom = zoom_level * ZOOM_TO_PERCENT;
-                        let text = format!("{:.1}%", real_zoom);
-
-                        let mut text_paint =
-                            Paint::new(Color4f::from(Color::WHITE), None);
-                        text_paint.set_anti_alias(true);
-                        let (text_width, _) =
-                            ui_font.measure_str(&text, Some(&text_paint));
-
-                        let padding = 10.0;
-                        let box_width = text_width + (padding * 2.0);
-                        let box_height = 40.0;
-
-                        let box_x = size.width as f32 - box_width - 20.0;
-                        let box_y = size.height as f32 - box_height - 20.0;
-
-                        let mut bg_paint = Paint::new(
-                            Color4f::from(Color::from_argb(180, 0, 0, 0)),
-                            None,
-                        );
-                        bg_paint.set_anti_alias(true);
-                        let bg_rect =
-                            Rect::from_xywh(box_x, box_y, box_width, box_height);
-                        canvas.draw_rect(bg_rect, &bg_paint);
-
-                        canvas.draw_str(
-                            &text,
-                            Point::new(box_x + padding, box_y + 28.0),
-                            &ui_font,
-                            &text_paint,
-                        );
-
-                        // --- DRAW TOOL MODE INDICATOR ---
-                        let tool_text = match current_tool {
-                            ToolMode::Hand => "Hand Tool (Alt)",
-                            ToolMode::Selection => "Selection Tool (Alt)",
-                        };
-                        let (tool_text_width, _) =
-                            ui_font.measure_str(tool_text, Some(&text_paint));
-                        let tool_padding = 10.0;
-                        let tool_box_width = tool_text_width + (tool_padding * 2.0);
-                        let tool_box_height = 40.0;
-                        let tool_box_x = 20.0;
-                        let tool_box_y =
-                            size.height as f32 - tool_box_height - 20.0;
-
-                        canvas.draw_rect(
-                            Rect::from_xywh(
-                                tool_box_x,
-                                tool_box_y,
-                                tool_box_width,
-                                tool_box_height,
-                            ),
-                            &bg_paint,
-                        );
-                        canvas.draw_str(
-                            tool_text,
-                            Point::new(
-                                tool_box_x + tool_padding,
-                                tool_box_y + 28.0,
-                            ),
-                            &ui_font,
-                            &text_paint,
-                        );
-
                         gr_context.flush_and_submit();
 
-                        // Synchronize before presenting. For a PDF viewer with infrequent
-                        // redraws, device_wait_idle is acceptable and simpler than full
-                        // semaphore-based synchronization.
+                        // Synchronize before presenting.
                         unsafe {
                             device.device_wait_idle().unwrap();
                         }
@@ -1052,7 +1278,9 @@ fn main() {
                                 .queue_present(graphics_queue, &present_info)
                         };
 
-                        if let Err(avk::Result::ERROR_OUT_OF_DATE_KHR) = present_result {
+                        if let Err(avk::Result::ERROR_OUT_OF_DATE_KHR) =
+                            present_result
+                        {
                             unsafe { device.device_wait_idle().unwrap() };
                             swapchain_state = create_swapchain(
                                 &surface_loader,
@@ -1062,8 +1290,9 @@ fn main() {
                                 &window,
                                 Some(swapchain_state.swapchain),
                             );
-                            cached_pdf_image = None;
-                            zoom_cache.clear();
+                            page_images
+                                .iter_mut()
+                                .for_each(|img| *img = None);
                             rendered_zoom = 0.0;
                         }
                     }
@@ -1193,18 +1422,18 @@ fn vk_format_to_skia(format: avk::Format) -> skia_vk::Format {
 }
 
 /// Adjust pan offset so the point under the mouse cursor stays fixed after a zoom change.
+/// `center` is the screen-space anchor: for horizontal, the center of the viewport;
+/// for vertical, 0.0 since the document starts at the top.
 fn zoom_to_cursor(
     old_zoom: f32,
     new_zoom: f32,
     mouse: (f32, f32),
-    win_size: (f32, f32),
+    center: (f32, f32),
     pan: &mut (f32, f32),
 ) {
     let k = new_zoom / old_zoom;
-    let cx = win_size.0 / 2.0;
-    let cy = win_size.1 / 2.0;
-    pan.0 = (1.0 - k) * (mouse.0 - cx) + k * pan.0;
-    pan.1 = (1.0 - k) * (mouse.1 - cy) + k * pan.1;
+    pan.0 = (1.0 - k) * (mouse.0 - center.0) + k * pan.0;
+    pan.1 = (1.0 - k) * (mouse.1 - center.1) + k * pan.1;
 }
 
 fn pdf_path_from_args() -> PathBuf {
