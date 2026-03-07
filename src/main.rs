@@ -29,8 +29,11 @@ const MAX_TEXTURE_SIZE: i32 = 16384;
 const ZOOM_DEBOUNCE_MS: u64 = 150;
 const ZOOM_CACHE_MAX_ENTRIES: usize = 5;
 const ZOOM_FACTOR: f32 = 1.10;
+/// Multiplier to convert internal zoom_level to displayed zoom percentage.
+/// At zoom_level=1.0 the page fits the window, which corresponds to ~77.4% of the PDF's native size.
 const ZOOM_TO_PERCENT: f32 = 77.4;
 const MAX_ZOOM_PERCENT: f32 = 6200.0;
+const MAX_ZOOM_LEVEL: f32 = MAX_ZOOM_PERCENT / ZOOM_TO_PERCENT;
 
 fn main() {
     // 1. Initialize PDFium
@@ -300,9 +303,8 @@ fn main() {
                         if zoom_level < 0.1 {
                             zoom_level = 0.1;
                         }
-                        let max_zoom_level = MAX_ZOOM_PERCENT / ZOOM_TO_PERCENT;
-                        if zoom_level > max_zoom_level {
-                            zoom_level = max_zoom_level;
+                        if zoom_level > MAX_ZOOM_LEVEL {
+                            zoom_level = MAX_ZOOM_LEVEL;
                         }
 
                         // Debounce: record time, don't invalidate cache yet
@@ -343,9 +345,8 @@ fn main() {
                             Key::Character(c) => match c.as_str() {
                                 "+" | "=" => {
                                     zoom_level *= ZOOM_FACTOR;
-                                    let max_zoom_level = MAX_ZOOM_PERCENT / ZOOM_TO_PERCENT;
-                                    if zoom_level > max_zoom_level {
-                                        zoom_level = max_zoom_level;
+                                    if zoom_level > MAX_ZOOM_LEVEL {
+                                        zoom_level = MAX_ZOOM_LEVEL;
                                     }
                                     needs_rerender = true;
                                 }
