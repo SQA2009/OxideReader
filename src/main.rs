@@ -25,9 +25,12 @@ use skia_safe::{
 
 use pdfium_render::prelude::*;
 
-const MAX_TEXTURE_SIZE: i32 = 12000;
+const MAX_TEXTURE_SIZE: i32 = 16384;
 const ZOOM_DEBOUNCE_MS: u64 = 150;
 const ZOOM_CACHE_MAX_ENTRIES: usize = 5;
+const ZOOM_FACTOR: f32 = 1.10;
+const ZOOM_TO_PERCENT: f32 = 77.4;
+const MAX_ZOOM_PERCENT: f32 = 6200.0;
 
 fn main() {
     // 1. Initialize PDFium
@@ -289,14 +292,17 @@ fn main() {
                             MouseScrollDelta::PixelDelta(pos) => pos.y as f32,
                         };
 
-                        let zoom_factor = 1.1;
                         if scroll_y > 0.0 {
-                            zoom_level *= zoom_factor;
+                            zoom_level *= ZOOM_FACTOR;
                         } else if scroll_y < 0.0 {
-                            zoom_level /= zoom_factor;
+                            zoom_level /= ZOOM_FACTOR;
                         }
                         if zoom_level < 0.1 {
                             zoom_level = 0.1;
+                        }
+                        let max_zoom_level = MAX_ZOOM_PERCENT / ZOOM_TO_PERCENT;
+                        if zoom_level > max_zoom_level {
+                            zoom_level = max_zoom_level;
                         }
 
                         // Debounce: record time, don't invalidate cache yet
@@ -336,11 +342,15 @@ fn main() {
                             }
                             Key::Character(c) => match c.as_str() {
                                 "+" | "=" => {
-                                    zoom_level *= 1.1;
+                                    zoom_level *= ZOOM_FACTOR;
+                                    let max_zoom_level = MAX_ZOOM_PERCENT / ZOOM_TO_PERCENT;
+                                    if zoom_level > max_zoom_level {
+                                        zoom_level = max_zoom_level;
+                                    }
                                     needs_rerender = true;
                                 }
                                 "-" => {
-                                    zoom_level /= 1.1;
+                                    zoom_level /= ZOOM_FACTOR;
                                     if zoom_level < 0.1 {
                                         zoom_level = 0.1;
                                     }
@@ -424,6 +434,12 @@ fn main() {
                                     last_zoom_time = None;
                                 }
                                 // else: still zooming rapidly, show scaled preview
+                                // Ensure we wake up after the debounce period to re-render
+                                else {
+                                    target.set_control_flow(ControlFlow::WaitUntil(
+                                        last_time + Duration::from_millis(ZOOM_DEBOUNCE_MS),
+                                    ));
+                                }
                             }
                         }
 
@@ -554,7 +570,7 @@ fn main() {
 
                             let image_info = ImageInfo::new(
                                 (texture_width, texture_height),
-                                ColorType::RGBA8888,
+                                ColorType::BGRA8888,
                                 AlphaType::Premul,
                                 None,
                             );
@@ -597,6 +613,9 @@ fn main() {
                                     content_rect,
                                 ));
                             }
+
+                            // Sync rendered_zoom so debounce logic knows this level is current
+                            rendered_zoom = zoom_level;
                         }
 
                         // --- DRAW ---
@@ -639,7 +658,7 @@ fn main() {
                         }
 
                         // --- DRAW ZOOM PERCENTAGE ---
-                        let real_zoom = zoom_level * 77.4;
+                        let real_zoom = zoom_level * ZOOM_TO_PERCENT;
                         let text = format!("{:.1}%", real_zoom);
 
                         let mut text_paint =
