@@ -713,6 +713,7 @@ fn main() {
                                 .set_target_width(texture_width)
                                 .set_target_height(texture_height)
                                 .set_format(PdfBitmapFormat::BGRA)
+                                .set_reverse_byte_order(false)
                                 .use_print_quality(true)
                                 .render_annotations(true);
 
