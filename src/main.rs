@@ -41,7 +41,7 @@ const SETTINGS_MENU_Y: f32 = 20.0;
 const SETTINGS_MENU_WIDTH: f32 = 280.0;
 const SETTINGS_HEADER_HEIGHT: f32 = 40.0;
 const SETTINGS_ROW_HEIGHT: f32 = 32.0;
-const SETTINGS_NUM_ITEMS: usize = 3;
+const SETTINGS_NUM_ITEMS: usize = 4;
 
 fn main() {
     // 1. Initialize PDFium
@@ -286,6 +286,8 @@ fn main() {
     let mut text_smoothing = false;
     let mut path_smoothing = false;
     let mut image_smoothing = false;
+    // Color management: force halftone for higher quality image stretching
+    let mut force_halftone = false;
     let mut show_settings_menu = false;
 
     // 6. Run Loop
@@ -348,6 +350,10 @@ fn main() {
                                         }
                                         2 => {
                                             image_smoothing = !image_smoothing;
+                                            true
+                                        }
+                                        3 => {
+                                            force_halftone = !force_halftone;
                                             true
                                         }
                                         _ => false,
@@ -514,6 +520,15 @@ fn main() {
                                 "3" => {
                                     if show_settings_menu {
                                         image_smoothing = !image_smoothing;
+                                        cached_pdf_image = None;
+                                        zoom_cache.clear();
+                                        rendered_zoom = 0.0;
+                                        window.request_redraw();
+                                    }
+                                }
+                                "4" => {
+                                    if show_settings_menu {
+                                        force_halftone = !force_halftone;
                                         cached_pdf_image = None;
                                         zoom_cache.clear();
                                         rendered_zoom = 0.0;
@@ -728,6 +743,9 @@ fn main() {
                             if image_smoothing {
                                 render_config = render_config.set_image_smoothing(true);
                             }
+                            if force_halftone {
+                                render_config = render_config.force_half_tone(true);
+                            }
 
                             let bitmap = page
                                 .render_with_config(&render_config)
@@ -829,6 +847,7 @@ fn main() {
                                 ("1  Text Smoothing", text_smoothing),
                                 ("2  Path Smoothing", path_smoothing),
                                 ("3  Image Smoothing", image_smoothing),
+                                ("4  Force Halftone", force_halftone),
                             ];
                             let menu_height = SETTINGS_HEADER_HEIGHT
                                 + SETTINGS_ROW_HEIGHT * items.len() as f32
@@ -855,7 +874,7 @@ fn main() {
                                 Paint::new(Color4f::from(Color::WHITE), None);
                             header_paint.set_anti_alias(true);
                             canvas.draw_str(
-                                "Antialiasing Settings",
+                                "Render Settings",
                                 Point::new(
                                     SETTINGS_MENU_X + 10.0,
                                     SETTINGS_MENU_Y + 28.0,
