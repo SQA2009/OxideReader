@@ -63,20 +63,20 @@ The compiled binary will be located at `target/release/rust-pdf-skia` (or `rust-
 
 ## Usage
 
-### 1. Place a PDF File
+### 1. Provide a PDF File
 
-Put a PDF named `test.pdf` in the same directory as the compiled binary (or the project root when using `cargo run`).
+Put a PDF named `test.pdf` in the same directory as the compiled binary (or the project root when using `cargo run`), **or** pass a path to a PDF as the first argument.
 
 ### 2. Run the Application
 
 ```bash
-cargo run --release
+cargo run --release -- ./path/to/file.pdf
 ```
 
 Or run the compiled binary directly:
 
 ```bash
-./target/release/rust-pdf-skia
+./target/release/rust-pdf-skia ./path/to/file.pdf
 ```
 
 ### 3. Navigation & Controls
@@ -109,7 +109,7 @@ Or run the compiled binary directly:
 
 3. **Add the PDFium library** to the project root (see Requirements above).
 
-4. **Drop in a test PDF** named `test.pdf`.
+4. **Drop in a test PDF** named `test.pdf`, or plan to pass a PDF path as the first argument.
 
 5. **Build and run:**
    ```bash
