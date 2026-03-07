@@ -19,8 +19,8 @@ use ash::vk::{self as avk, Handle};
 use skia_safe::gpu::vk as skia_vk;
 use skia_safe::gpu::SurfaceOrigin;
 use skia_safe::{
-    font::Edging, AlphaType, Color, Color4f, ColorType, CubicResampler, Data, Font, FontHinting,
-    FontMgr, FontStyle, Image, ImageInfo, Paint, Point, Rect, SamplingOptions,
+    font::Edging, AlphaType, Color, Color4f, ColorSpace, ColorType, CubicResampler, Data, Font,
+    FontHinting, FontMgr, FontStyle, Image, ImageInfo, Paint, Point, Rect, SamplingOptions,
 };
 
 use pdfium_render::prelude::*;
@@ -283,9 +283,9 @@ fn main() {
     let mut zoom_cache: Vec<(i32, u32, u32, u16, Image, Rect)> = Vec::new();
 
     // Antialiasing settings
-    let mut text_smoothing = true;
-    let mut path_smoothing = true;
-    let mut image_smoothing = true;
+    let mut text_smoothing = false;
+    let mut path_smoothing = false;
+    let mut image_smoothing = false;
     let mut show_settings_menu = false;
 
     // 6. Run Loop
@@ -663,7 +663,7 @@ fn main() {
                                 &backend_render_target,
                                 SurfaceOrigin::TopLeft,
                                 ColorType::BGRA8888,
-                                None,
+                                ColorSpace::new_srgb(),
                                 None,
                             )
                             .expect("Failed to create Skia surface from Vulkan render target");
@@ -715,7 +715,9 @@ fn main() {
                                 .set_format(PdfBitmapFormat::BGRA)
                                 .set_reverse_byte_order(false)
                                 .use_print_quality(true)
-                                .render_annotations(true);
+                                .render_annotations(true)
+                                .set_clear_color(PdfColor::new(255, 255, 255, 255))
+                                .use_lcd_text_rendering(false);
 
                             if text_smoothing {
                                 render_config = render_config.set_text_smoothing(true);
@@ -735,7 +737,7 @@ fn main() {
                                 (texture_width, texture_height),
                                 ColorType::BGRA8888,
                                 AlphaType::Unpremul,
-                                None,
+                                ColorSpace::new_srgb(),
                             );
 
                             let raw_bytes = bitmap.as_raw_bytes();
