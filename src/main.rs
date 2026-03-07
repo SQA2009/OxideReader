@@ -1,5 +1,7 @@
+use std::env;
 use std::ffi::CString;
 use std::num::NonZeroU32;
+use std::path::PathBuf;
 
 use winit::event::{Event, WindowEvent, ElementState, KeyEvent, MouseButton, MouseScrollDelta};
 use winit::event_loop::{EventLoop, ControlFlow};
@@ -30,8 +32,18 @@ fn main() {
         .expect("CRITICAL: Could not find PDFium library.");
 
     let pdfium = Pdfium::new(pdfium_bindings);
-    let document = pdfium.load_pdf_from_file("test.pdf", None)
-        .expect("CRITICAL: Could not find 'test.pdf'.");
+    let pdf_path = pdf_path_from_args();
+    if !pdf_path.exists() {
+        eprintln!(
+            "ERROR: PDF file not found at '{}'. Provide a path as the first argument or place a 'test.pdf' next to the binary.",
+            pdf_path.display()
+        );
+        std::process::exit(1);
+    }
+
+    let document = pdfium
+        .load_pdf_from_file(&pdf_path, None)
+        .expect("CRITICAL: Failed to open the PDF file.");
 
     let total_pages = document.pages().len();
     
@@ -240,8 +252,8 @@ fn main() {
                             (w, h)
                         };
 
-                        let mut final_width = (fit_width * zoom_level).round() as i32;
-                        let mut final_height = (fit_height * zoom_level).round() as i32;
+                        let final_width = (fit_width * zoom_level).round() as i32;
+                        let final_height = (fit_height * zoom_level).round() as i32;
 
                         let mut texture_width = final_width;
                         let mut texture_height = final_height;
@@ -315,7 +327,7 @@ fn main() {
                         let box_y = size.height as f32 - box_height - 20.0;
 
                         // FIX 2: Convert Color to Color4f for Background Paint
-                        let mut bg_paint = Paint::new(Color4f::from(Color::from_argb(180, 0, 0, 0)), None);
+                        let bg_paint = Paint::new(Color4f::from(Color::from_argb(180, 0, 0, 0)), None);
                         let bg_rect = Rect::from_xywh(box_x, box_y, box_width, box_height);
                         canvas.draw_rect(bg_rect, &bg_paint);
 
@@ -336,4 +348,11 @@ fn main() {
             _ => (),
         }
     }).unwrap();
+}
+
+fn pdf_path_from_args() -> PathBuf {
+    env::args()
+        .nth(1)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("test.pdf"))
 }
