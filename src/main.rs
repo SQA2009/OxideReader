@@ -521,15 +521,19 @@ fn main() {
                                 Key::Named(NamedKey::Enter) => {
                                     // Apply zoom value
                                     if let Ok(val) = zoom_input_text.parse::<f32>() {
-                                        let new_zoom = val / ZOOM_TO_PERCENT;
-                                        zoom_level = new_zoom.clamp(0.1, MAX_ZOOM_LEVEL);
-                                        page_images
-                                            .iter_mut()
-                                            .for_each(|img| *img = None);
-                                        rendered_zoom = zoom_level;
-                                        last_zoom_time = None;
+                                        if val > 0.0 {
+                                            let new_zoom = val / ZOOM_TO_PERCENT;
+                                            zoom_level = new_zoom.clamp(0.1, MAX_ZOOM_LEVEL);
+                                            page_images
+                                                .iter_mut()
+                                                .for_each(|img| *img = None);
+                                            rendered_zoom = zoom_level;
+                                            last_zoom_time = None;
+                                            zoom_input_active = false;
+                                        }
+                                        // else: invalid value, keep textbox active
                                     }
-                                    zoom_input_active = false;
+                                    // Parse failed: keep textbox active so user can fix input
                                     window.request_redraw();
                                     return;
                                 }
@@ -549,8 +553,13 @@ fn main() {
                                         .chars()
                                         .all(|ch| ch.is_ascii_digit() || ch == '.')
                                     {
-                                        zoom_input_text.push_str(c_str);
-                                        window.request_redraw();
+                                        // Only allow one decimal point
+                                        if !c_str.contains('.')
+                                            || !zoom_input_text.contains('.')
+                                        {
+                                            zoom_input_text.push_str(c_str);
+                                            window.request_redraw();
+                                        }
                                     }
                                     return;
                                 }
