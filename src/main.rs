@@ -45,12 +45,40 @@ const SETTINGS_NUM_ITEMS: usize = 3;
 
 fn main() {
     // 1. Initialize PDFium
-    let pdfium_bindings =
-        Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path("./"))
-            .or_else(|_| {
-                Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path("./libs"))
-            })
-            .expect("CRITICAL: Could not find PDFium library.");
+    let pdfium_bindings = if let Ok(pdfium_path) = env::var("PDFIUM_PATH") {
+        let lib_path = Pdfium::pdfium_platform_library_name_at_path(&pdfium_path);
+        Pdfium::bind_to_library(lib_path.clone()).unwrap_or_else(|error| {
+            eprintln!("CRITICAL: Could not load PDFium library from PDFIUM_PATH.");
+            eprintln!("  PDFIUM_PATH: {}", pdfium_path);
+            eprintln!("  Expected library: {}", lib_path.display());
+            eprintln!("  Error: {}", error);
+            eprintln!(
+                "  Download prebuilt binaries: https://github.com/bblanchon/pdfium-binaries"
+            );
+            std::process::exit(1);
+        })
+    } else {
+        let root_path = Pdfium::pdfium_platform_library_name_at_path("./");
+        let libs_path = Pdfium::pdfium_platform_library_name_at_path("./libs");
+        match Pdfium::bind_to_library(root_path.clone()) {
+            Ok(bindings) => bindings,
+            Err(root_error) => match Pdfium::bind_to_library(libs_path.clone()) {
+                Ok(bindings) => bindings,
+                Err(libs_error) => {
+                    eprintln!("CRITICAL: Could not find PDFium library.");
+                    eprintln!("  Tried: {}", root_path.display());
+                    eprintln!("  Tried: {}", libs_path.display());
+                    eprintln!("  Error from {}: {}", root_path.display(), root_error);
+                    eprintln!("  Error from {}: {}", libs_path.display(), libs_error);
+                    eprintln!("  Set PDFIUM_PATH to the directory containing the library.");
+                    eprintln!(
+                        "  Download prebuilt binaries: https://github.com/bblanchon/pdfium-binaries"
+                    );
+                    std::process::exit(1);
+                }
+            },
+        }
+    };
 
     let pdfium = Pdfium::new(pdfium_bindings);
     let pdf_path = pdf_path_from_args();
@@ -685,6 +713,7 @@ fn main() {
                                 .set_target_width(texture_width)
                                 .set_target_height(texture_height)
                                 .set_format(PdfBitmapFormat::BGRA)
+                                .set_reverse_byte_order(false)
                                 .use_print_quality(true)
                                 .render_annotations(true);
 

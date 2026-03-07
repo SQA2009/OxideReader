@@ -24,7 +24,7 @@ This code was *lovingly* crafted with the help of **ChatGPT**. Yes, an AI helped
 ## Requirements
 
 - [Rust toolchain](https://rustup.rs/) (stable, 1.70+)
-- A copy of the **PDFium** shared library (`pdfium.dll` on Windows, `libpdfium.so` on Linux, `libpdfium.dylib` on macOS) placed next to the compiled binary or in a `libs/` subfolder.  
+- A copy of the **PDFium** shared library (`pdfium.dll` on Windows, `libpdfium.so` on Linux, `libpdfium.dylib` on macOS) placed next to the compiled binary or in a `libs/` subfolder. You can also set `PDFIUM_PATH` to the directory containing the library.  
   Pre-built binaries are available from the [pdfium-binaries](https://github.com/bblanchon/pdfium-binaries) project.
 - A GPU driver that supports **OpenGL**.
 
@@ -50,6 +50,8 @@ RustifyFlow/
 └── src/
     └── main.rs
 ```
+
+You can also set `PDFIUM_PATH` to the directory that contains the library instead of copying it.
 
 ### 3. Build the Project
 
