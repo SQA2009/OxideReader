@@ -734,18 +734,19 @@ fn main() {
                             let image_info = ImageInfo::new(
                                 (texture_width, texture_height),
                                 ColorType::BGRA8888,
-                                AlphaType::Premul,
+                                AlphaType::Unpremul,
                                 None,
                             );
 
-                            let data = Data::new_copy(&bitmap.as_raw_bytes());
-                            let row_bytes = texture_width as usize * 4;
+                            let raw_bytes = bitmap.as_raw_bytes();
+                            let row_bytes = raw_bytes.len() / texture_height as usize;
+                            let data = Data::new_copy(&raw_bytes);
 
                             cached_pdf_image =
                                 skia_safe::images::raster_from_data(&image_info, data, row_bytes);
 
-                            let x = (size.width as f32 - final_width as f32) / 2.0;
-                            let y = (size.height as f32 - final_height as f32) / 2.0;
+                            let x = ((size.width as f32 - final_width as f32) / 2.0).floor();
+                            let y = ((size.height as f32 - final_height as f32) / 2.0).floor();
 
                             content_rect = Rect::from_xywh(
                                 x,
