@@ -62,6 +62,9 @@ fn main() {
         .unwrap();
 
     // 3. Setup Vulkan
+    // Note: Box::leak is used intentionally for Vulkan resources that must outlive the event loop
+    // closure. The GetProc callback and BackendContext require 'static references to entry/instance/device.
+    // These are cleaned up by the OS on process exit.
     let entry: &'static ash::Entry = Box::leak(Box::new(
         unsafe { ash::Entry::load() }.expect("Failed to load Vulkan library"),
     ));
@@ -162,17 +165,14 @@ fn main() {
         &surface_loader,
         &swapchain_loader,
         physical_device,
-        device,
         vk_surface,
         &window,
         None,
     );
 
-    // Create synchronization primitives
+    // Create synchronization primitive for image acquisition
     let semaphore_info = avk::SemaphoreCreateInfo::builder();
     let image_available_semaphore =
-        unsafe { device.create_semaphore(&semaphore_info, None).unwrap() };
-    let _render_finished_semaphore =
         unsafe { device.create_semaphore(&semaphore_info, None).unwrap() };
 
     // 4. Create Skia Vulkan context
@@ -381,7 +381,6 @@ fn main() {
                                 &surface_loader,
                                 &swapchain_loader,
                                 physical_device,
-                                device,
                                 vk_surface,
                                 &window,
                                 Some(swapchain_state.swapchain),
@@ -447,7 +446,6 @@ fn main() {
                                     &surface_loader,
                                     &swapchain_loader,
                                     physical_device,
-                                    device,
                                     vk_surface,
                                     &window,
                                     Some(swapchain_state.swapchain),
@@ -466,7 +464,7 @@ fn main() {
                         // Create Skia surface from swapchain image
                         let vk_image_info = unsafe {
                             skia_vk::ImageInfo::new(
-                                std::mem::transmute(swapchain_image),
+                                swapchain_image.as_raw() as skia_vk::Image,
                                 skia_vk::Alloc::default(),
                                 skia_vk::ImageTiling::OPTIMAL,
                                 skia_vk::ImageLayout::UNDEFINED,
@@ -675,7 +673,9 @@ fn main() {
 
                         gr_context.flush_and_submit();
 
-                        // Wait for rendering to complete before presenting
+                        // Synchronize before presenting. For a PDF viewer with infrequent
+                        // redraws, device_wait_idle is acceptable and simpler than full
+                        // semaphore-based synchronization.
                         unsafe {
                             device.device_wait_idle().unwrap();
                         }
@@ -698,7 +698,6 @@ fn main() {
                                 &surface_loader,
                                 &swapchain_loader,
                                 physical_device,
-                                device,
                                 vk_surface,
                                 &window,
                                 Some(swapchain_state.swapchain),
@@ -729,7 +728,6 @@ fn create_swapchain(
     surface_loader: &khr::Surface,
     swapchain_loader: &khr::Swapchain,
     physical_device: avk::PhysicalDevice,
-    _device: &ash::Device,
     surface: avk::SurfaceKHR,
     window: &winit::window::Window,
     old_swapchain: Option<avk::SwapchainKHR>,
@@ -826,8 +824,11 @@ fn create_swapchain(
     }
 }
 
-/// Map Vulkan format to Skia Vulkan format
+/// Map Vulkan format (ash) to Skia Vulkan format.
+/// Both are #[repr(i32)] enums representing VkFormat values.
 fn vk_format_to_skia(format: avk::Format) -> skia_vk::Format {
+    // Safety: Both ash::vk::Format and skia_vk::Format are #[repr(i32)]
+    // representations of the same Vulkan VkFormat enum values.
     unsafe { std::mem::transmute(format.as_raw()) }
 }
 
