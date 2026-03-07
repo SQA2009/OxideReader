@@ -35,6 +35,14 @@ const ZOOM_TO_PERCENT: f32 = 77.4;
 const MAX_ZOOM_PERCENT: f32 = 6200.0;
 const MAX_ZOOM_LEVEL: f32 = MAX_ZOOM_PERCENT / ZOOM_TO_PERCENT;
 
+/// Layout constants for the antialiasing settings menu.
+const SETTINGS_MENU_X: f32 = 20.0;
+const SETTINGS_MENU_Y: f32 = 20.0;
+const SETTINGS_MENU_WIDTH: f32 = 280.0;
+const SETTINGS_HEADER_HEIGHT: f32 = 40.0;
+const SETTINGS_ROW_HEIGHT: f32 = 32.0;
+const SETTINGS_NUM_ITEMS: usize = 3;
+
 fn main() {
     // 1. Initialize PDFium
     let pdfium_bindings =
@@ -246,10 +254,20 @@ fn main() {
     // Zoom cache: (zoom_key, window_width, window_height, page_index, image, content_rect)
     let mut zoom_cache: Vec<(i32, u32, u32, u16, Image, Rect)> = Vec::new();
 
+    // Antialiasing settings
+    let mut text_smoothing = true;
+    let mut path_smoothing = true;
+    let mut image_smoothing = true;
+    let mut show_settings_menu = false;
+
     // 6. Run Loop
     event_loop
         .run(move |event, target| {
-            target.set_control_flow(ControlFlow::Wait);
+            // Only go to sleep when no zoom timer is pending; otherwise
+            // keep the WaitUntil deadline so the debounce fires reliably.
+            if last_zoom_time.is_none() {
+                target.set_control_flow(ControlFlow::Wait);
+            }
 
             match event {
                 Event::LoopExiting => {
@@ -272,7 +290,54 @@ fn main() {
                         button: MouseButton::Left,
                         ..
                     } => {
-                        is_dragging = state == ElementState::Pressed;
+                        if state == ElementState::Pressed && show_settings_menu {
+                            // Check if click is within the settings menu
+                            let menu_height = SETTINGS_HEADER_HEIGHT
+                                + SETTINGS_ROW_HEIGHT * SETTINGS_NUM_ITEMS as f32
+                                + 10.0;
+                            let (mx, my) = last_mouse_pos;
+
+                            if mx >= SETTINGS_MENU_X
+                                && mx <= SETTINGS_MENU_X + SETTINGS_MENU_WIDTH
+                                && my >= SETTINGS_MENU_Y
+                                && my <= SETTINGS_MENU_Y + menu_height
+                            {
+                                // Determine which row was clicked
+                                let row_y_start =
+                                    SETTINGS_MENU_Y + SETTINGS_HEADER_HEIGHT;
+                                if my >= row_y_start {
+                                    let row_index = ((my - row_y_start)
+                                        / SETTINGS_ROW_HEIGHT)
+                                        as usize;
+                                    let toggled = match row_index {
+                                        0 => {
+                                            text_smoothing = !text_smoothing;
+                                            true
+                                        }
+                                        1 => {
+                                            path_smoothing = !path_smoothing;
+                                            true
+                                        }
+                                        2 => {
+                                            image_smoothing = !image_smoothing;
+                                            true
+                                        }
+                                        _ => false,
+                                    };
+                                    if toggled {
+                                        cached_pdf_image = None;
+                                        zoom_cache.clear();
+                                        rendered_zoom = 0.0;
+                                        window.request_redraw();
+                                    }
+                                }
+                                // Don't start dragging when clicking inside the menu
+                            } else {
+                                is_dragging = true;
+                            }
+                        } else {
+                            is_dragging = state == ElementState::Pressed;
+                        }
                     }
 
                     WindowEvent::CursorMoved { position, .. } => {
@@ -395,6 +460,37 @@ fn main() {
                                     last_zoom_time = None;
                                     zoom_cache.clear();
                                     window.request_redraw();
+                                }
+                                "s" | "S" => {
+                                    show_settings_menu = !show_settings_menu;
+                                    window.request_redraw();
+                                }
+                                "1" => {
+                                    if show_settings_menu {
+                                        text_smoothing = !text_smoothing;
+                                        cached_pdf_image = None;
+                                        zoom_cache.clear();
+                                        rendered_zoom = 0.0;
+                                        window.request_redraw();
+                                    }
+                                }
+                                "2" => {
+                                    if show_settings_menu {
+                                        path_smoothing = !path_smoothing;
+                                        cached_pdf_image = None;
+                                        zoom_cache.clear();
+                                        rendered_zoom = 0.0;
+                                        window.request_redraw();
+                                    }
+                                }
+                                "3" => {
+                                    if show_settings_menu {
+                                        image_smoothing = !image_smoothing;
+                                        cached_pdf_image = None;
+                                        zoom_cache.clear();
+                                        rendered_zoom = 0.0;
+                                        window.request_redraw();
+                                    }
                                 }
                                 _ => {}
                             },
@@ -585,15 +681,22 @@ fn main() {
                             }
 
                             // Anti-aliasing: smooth strokes, enhance fine lines, smooth images
-                            let render_config = PdfRenderConfig::new()
+                            let mut render_config = PdfRenderConfig::new()
                                 .set_target_width(texture_width)
                                 .set_target_height(texture_height)
                                 .set_format(PdfBitmapFormat::BGRA)
-                                .set_text_smoothing(true)
-                                .set_path_smoothing(true)
-                                .set_image_smoothing(true)
                                 .use_print_quality(true)
                                 .render_annotations(true);
+
+                            if text_smoothing {
+                                render_config = render_config.set_text_smoothing(true);
+                            }
+                            if path_smoothing {
+                                render_config = render_config.set_path_smoothing(true);
+                            }
+                            if image_smoothing {
+                                render_config = render_config.set_image_smoothing(true);
+                            }
 
                             let bitmap = page
                                 .render_with_config(&render_config)
@@ -686,6 +789,95 @@ fn main() {
                             canvas.draw_image_rect_with_sampling_options(
                                 image, None, display_rect, sampling, &paint,
                             );
+                        }
+
+                        // --- DRAW SETTINGS MENU ---
+                        if show_settings_menu {
+                            let items: [(&str, bool); SETTINGS_NUM_ITEMS] = [
+                                ("1  Text Smoothing", text_smoothing),
+                                ("2  Path Smoothing", path_smoothing),
+                                ("3  Image Smoothing", image_smoothing),
+                            ];
+                            let menu_height = SETTINGS_HEADER_HEIGHT
+                                + SETTINGS_ROW_HEIGHT * items.len() as f32
+                                + 10.0;
+
+                            // Background
+                            let mut menu_bg = Paint::new(
+                                Color4f::from(Color::from_argb(210, 25, 25, 25)),
+                                None,
+                            );
+                            menu_bg.set_anti_alias(true);
+                            canvas.draw_rect(
+                                Rect::from_xywh(
+                                    SETTINGS_MENU_X,
+                                    SETTINGS_MENU_Y,
+                                    SETTINGS_MENU_WIDTH,
+                                    menu_height,
+                                ),
+                                &menu_bg,
+                            );
+
+                            // Header
+                            let mut header_paint =
+                                Paint::new(Color4f::from(Color::WHITE), None);
+                            header_paint.set_anti_alias(true);
+                            canvas.draw_str(
+                                "Antialiasing Settings",
+                                Point::new(
+                                    SETTINGS_MENU_X + 10.0,
+                                    SETTINGS_MENU_Y + 28.0,
+                                ),
+                                &ui_font,
+                                &header_paint,
+                            );
+
+                            // Separator line
+                            let mut sep_paint = Paint::new(
+                                Color4f::from(Color::from_argb(100, 255, 255, 255)),
+                                None,
+                            );
+                            sep_paint.set_anti_alias(true);
+                            sep_paint.set_stroke_width(1.0);
+                            sep_paint.set_style(skia_safe::PaintStyle::Stroke);
+                            canvas.draw_line(
+                                Point::new(
+                                    SETTINGS_MENU_X + 10.0,
+                                    SETTINGS_MENU_Y + SETTINGS_HEADER_HEIGHT,
+                                ),
+                                Point::new(
+                                    SETTINGS_MENU_X + SETTINGS_MENU_WIDTH - 10.0,
+                                    SETTINGS_MENU_Y + SETTINGS_HEADER_HEIGHT,
+                                ),
+                                &sep_paint,
+                            );
+
+                            // Items
+                            let small_font =
+                                Font::from_typeface(ui_font.typeface(), 18.0);
+                            for (i, (label, enabled)) in items.iter().enumerate() {
+                                let iy = SETTINGS_MENU_Y
+                                    + SETTINGS_HEADER_HEIGHT
+                                    + SETTINGS_ROW_HEIGHT * i as f32
+                                    + 24.0;
+                                let status = if *enabled { "  ON" } else { "  OFF" };
+                                let item_text = format!("{}{}", label, status);
+
+                                let color = if *enabled {
+                                    Color::from_rgb(100, 220, 100)
+                                } else {
+                                    Color::from_rgb(180, 80, 80)
+                                };
+                                let mut item_paint =
+                                    Paint::new(Color4f::from(color), None);
+                                item_paint.set_anti_alias(true);
+                                canvas.draw_str(
+                                    &item_text,
+                                    Point::new(SETTINGS_MENU_X + 14.0, iy),
+                                    &small_font,
+                                    &item_paint,
+                                );
+                            }
                         }
 
                         // --- DRAW ZOOM PERCENTAGE ---
