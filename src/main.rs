@@ -310,14 +310,14 @@ fn main() {
 
                         // Zoom-to-cursor: adjust pan so the point under the
                         // mouse stays fixed after the zoom change.
-                        let k = zoom_level / old_zoom;
                         let win = window.inner_size();
-                        let cx = win.width as f32 / 2.0;
-                        let cy = win.height as f32 / 2.0;
-                        pan_offset.0 =
-                            (1.0 - k) * (last_mouse_pos.0 - cx) + k * pan_offset.0;
-                        pan_offset.1 =
-                            (1.0 - k) * (last_mouse_pos.1 - cy) + k * pan_offset.1;
+                        zoom_to_cursor(
+                            old_zoom,
+                            zoom_level,
+                            last_mouse_pos,
+                            (win.width as f32, win.height as f32),
+                            &mut pan_offset,
+                        );
 
                         // Debounce: record time, don't invalidate cache yet
                         last_zoom_time = Some(Instant::now());
@@ -361,17 +361,14 @@ fn main() {
                                     if zoom_level > MAX_ZOOM_LEVEL {
                                         zoom_level = MAX_ZOOM_LEVEL;
                                     }
-                                    // Zoom-to-cursor
-                                    let k = zoom_level / old_zoom;
                                     let win = window.inner_size();
-                                    let cx = win.width as f32 / 2.0;
-                                    let cy = win.height as f32 / 2.0;
-                                    pan_offset.0 = (1.0 - k)
-                                        * (last_mouse_pos.0 - cx)
-                                        + k * pan_offset.0;
-                                    pan_offset.1 = (1.0 - k)
-                                        * (last_mouse_pos.1 - cy)
-                                        + k * pan_offset.1;
+                                    zoom_to_cursor(
+                                        old_zoom,
+                                        zoom_level,
+                                        last_mouse_pos,
+                                        (win.width as f32, win.height as f32),
+                                        &mut pan_offset,
+                                    );
                                     needs_rerender = true;
                                 }
                                 "-" => {
@@ -380,17 +377,14 @@ fn main() {
                                     if zoom_level < 0.1 {
                                         zoom_level = 0.1;
                                     }
-                                    // Zoom-to-cursor
-                                    let k = zoom_level / old_zoom;
                                     let win = window.inner_size();
-                                    let cx = win.width as f32 / 2.0;
-                                    let cy = win.height as f32 / 2.0;
-                                    pan_offset.0 = (1.0 - k)
-                                        * (last_mouse_pos.0 - cx)
-                                        + k * pan_offset.0;
-                                    pan_offset.1 = (1.0 - k)
-                                        * (last_mouse_pos.1 - cy)
-                                        + k * pan_offset.1;
+                                    zoom_to_cursor(
+                                        old_zoom,
+                                        zoom_level,
+                                        last_mouse_pos,
+                                        (win.width as f32, win.height as f32),
+                                        &mut pan_offset,
+                                    );
                                     needs_rerender = true;
                                 }
                                 "0" => {
@@ -886,6 +880,21 @@ fn vk_format_to_skia(format: avk::Format) -> skia_vk::Format {
     // Safety: Both ash::vk::Format and skia_vk::Format are #[repr(i32)]
     // representations of the same Vulkan VkFormat enum values.
     unsafe { std::mem::transmute(format.as_raw()) }
+}
+
+/// Adjust pan offset so the point under the mouse cursor stays fixed after a zoom change.
+fn zoom_to_cursor(
+    old_zoom: f32,
+    new_zoom: f32,
+    mouse: (f32, f32),
+    win_size: (f32, f32),
+    pan: &mut (f32, f32),
+) {
+    let k = new_zoom / old_zoom;
+    let cx = win_size.0 / 2.0;
+    let cy = win_size.1 / 2.0;
+    pan.0 = (1.0 - k) * (mouse.0 - cx) + k * pan.0;
+    pan.1 = (1.0 - k) * (mouse.1 - cy) + k * pan.1;
 }
 
 fn pdf_path_from_args() -> PathBuf {
