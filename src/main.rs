@@ -9,8 +9,7 @@ use winit::event::{
 };
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
-use winit::window::{Icon, WindowBuilder};
-use winit::window::{CursorIcon, WindowBuilder};
+use winit::window::{CursorIcon, Icon, WindowBuilder};
 
 use raw_window_handle::{HasRawDisplayHandle, HasRawWindowHandle};
 
@@ -313,6 +312,7 @@ fn main() {
 
     // Zoom cache: (zoom_key, window_width, window_height, page_index, image, content_rect)
     let mut zoom_cache: Vec<(i32, u32, u32, u16, Image, Rect)> = Vec::new();
+    let mut cached_pdf_image: Option<Image> = None;
 
     // Antialiasing settings (FreeType text AA and RGB subpixel rendering enabled by default)
     let mut text_smoothing = true;
@@ -425,24 +425,28 @@ fn main() {
                                                 force_halftone = !force_halftone;
                                                 true
                                             }
+                                            4 => {
+                                                lcd_text_rendering = !lcd_text_rendering;
+                                                true
+                                            }
                                             _ => false,
                                         };
                                         if toggled {
-                                            page_images.iter_mut().for_each(|img| *img = None);
+                                            match row_index {
+                                                0..=3 => {
+                                                    page_images
+                                                        .iter_mut()
+                                                        .for_each(|img| *img = None);
+                                                }
+                                                4 => {
+                                                    let _ = cached_pdf_image.take();
+                                                    zoom_cache.clear();
+                                                }
+                                                _ => {}
+                                            }
                                             rendered_zoom = 0.0;
                                             window.request_redraw();
                                         }
-                                        4 => {
-                                            lcd_text_rendering = !lcd_text_rendering;
-                                            true
-                                        }
-                                        _ => false,
-                                    };
-                                    if toggled {
-                                        cached_pdf_image = None;
-                                        zoom_cache.clear();
-                                        rendered_zoom = 0.0;
-                                        window.request_redraw();
                                     }
                                     // Don't start dragging when clicking inside the menu
                                     return;
@@ -689,7 +693,7 @@ fn main() {
                                 "5" => {
                                     if show_settings_menu {
                                         lcd_text_rendering = !lcd_text_rendering;
-                                        cached_pdf_image = None;
+                                        let _ = cached_pdf_image.take();
                                         zoom_cache.clear();
                                         rendered_zoom = 0.0;
                                         window.request_redraw();
@@ -870,29 +874,6 @@ fn main() {
                                     continue;
                                 }
 
-                            // Anti-aliasing: smooth strokes, enhance fine lines, smooth images
-                            let mut render_config = PdfRenderConfig::new()
-                                .set_target_width(texture_width)
-                                .set_target_height(texture_height)
-                                .set_format(PdfBitmapFormat::BGRA)
-                                .set_reverse_byte_order(false)
-                                .use_print_quality(true)
-                                .render_annotations(true)
-                                .set_clear_color(PdfColor::new(255, 255, 255, 255))
-                                .use_lcd_text_rendering(lcd_text_rendering);
-
-                            if text_smoothing {
-                                render_config = render_config.set_text_smoothing(true);
-                            }
-                            if path_smoothing {
-                                render_config = render_config.set_path_smoothing(true);
-                            }
-                            if image_smoothing {
-                                render_config = render_config.set_image_smoothing(true);
-                            }
-                            if force_halftone {
-                                render_config = render_config.force_half_tone(true);
-                            }
                                 if page_images[i].is_some() {
                                     continue;
                                 }
@@ -926,6 +907,7 @@ fn main() {
                                     .get(i as u16)
                                     .expect("Error loading page");
 
+                                // Anti-aliasing: smooth strokes, enhance fine lines, smooth images
                                 let mut render_config = PdfRenderConfig::new()
                                     .set_target_width(texture_width)
                                     .set_target_height(texture_height)
@@ -936,7 +918,7 @@ fn main() {
                                     .set_clear_color(PdfColor::new(
                                         255, 255, 255, 255,
                                     ))
-                                    .use_lcd_text_rendering(false);
+                                    .use_lcd_text_rendering(lcd_text_rendering);
 
                                 if text_smoothing {
                                     render_config =
