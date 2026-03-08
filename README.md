@@ -1,10 +1,10 @@
-# RustifyFlow
+# OxideREader
 
 ## Acknowledgements
 
-This code was *lovingly* crafted with the help of **ChatGPT**. Yes, an AI helped make this. So if something doesn't work, feel free to blame the robots. But if it *does* work? Yeah, that was totally on purpose.
+This code was crafted with the help of **Github Copilot**. So if something doesn't work, feel free to blame the robots. But if it *does* work? That was totally on purpose.
 
-**RustifyFlow** is the *ultimate* PDF viewer you never knew you needed—because who doesn't want to *destroy* Adobe Acrobat Pro with a Rust program? Built with **pdfium-render** for high-fidelity PDF rendering and **Skia** for blazing-fast GPU-accelerated drawing, this tool is designed to be a *sleek* (or at least *functional*) alternative to the bloated giants of the PDF world. The old Python prototype days are over—welcome to the Rust era.
+**OxideReader** is the *ultimate* PDF viewer you never knew you needed—because who doesn't want to *destroy* Adobe Acrobat Pro with a Rust program? Built with **pdfium-render** for high-fidelity PDF rendering and **Skia** for blazing-fast GPU-accelerated drawing, this tool is designed to be a *sleek* (or at least *functional*) alternative to the bloated giants of the PDF world. The old Python prototype days are over—welcome to the Rust era.
 
 > **Note:** The previous Python versions (`acrobatprokiller.py`, `pdf31.py`, and all earlier iterations) have been archived under the [`Archive/`](./Archive/) folder for historical reference.
 
@@ -87,10 +87,9 @@ Or run the compiled binary directly:
 |--------|---------|
 | Next page | `→` (Right Arrow) |
 | Previous page | `←` (Left Arrow) |
-| Zoom in | `+` or `=` or scroll up |
-| Zoom out | `-` or scroll down |
+| Zoom in/out | `Ctrl`+`mouseWheel`|
 | Reset zoom & pan | `0` |
-| Pan | Click and drag |
+| Switch tool mode | `Alt` |
 
 ---
 
@@ -105,7 +104,7 @@ Or run the compiled binary directly:
 
 2. **Clone and enter the project:**
    ```bash
-   git clone https://github.com/SQA2009/RustifyFlow.git
+   git clone https://github.com/SQA2009/OxideReader.git
    cd RustifyFlow
    ```
 
