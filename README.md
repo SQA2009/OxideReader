@@ -1,4 +1,4 @@
-# OxideREader
+# OxideReader
 
 ## Acknowledgements
 
