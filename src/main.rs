@@ -24,7 +24,10 @@ use skia_safe::{
     SamplingOptions,
 };
 
-use pdfium_render::prelude::*;
+use hayro::hayro_interpret::InterpreterSettings;
+use hayro::hayro_syntax::Pdf;
+use hayro::vello_cpu::color::palette::css::WHITE;
+use hayro::{render, RenderCache, RenderSettings};
 
 const MAX_TEXTURE_SIZE: i32 = 16384;
 const ZOOM_DEBOUNCE_MS: u64 = 150;
@@ -61,43 +64,6 @@ enum ToolMode {
 }
 
 fn main() {
-    // 1. Initialize PDFium
-    let pdfium_bindings = if let Ok(pdfium_path) = env::var("PDFIUM_PATH") {
-        let lib_path = Pdfium::pdfium_platform_library_name_at_path(&pdfium_path);
-        Pdfium::bind_to_library(lib_path.clone()).unwrap_or_else(|error| {
-            eprintln!("CRITICAL: Could not load PDFium library from PDFIUM_PATH.");
-            eprintln!("  PDFIUM_PATH: {}", pdfium_path);
-            eprintln!("  Expected library: {}", lib_path.display());
-            eprintln!("  Error: {}", error);
-            eprintln!(
-                "  Download prebuilt binaries: https://github.com/bblanchon/pdfium-binaries"
-            );
-            std::process::exit(1);
-        })
-    } else {
-        let root_path = Pdfium::pdfium_platform_library_name_at_path("./");
-        let libs_path = Pdfium::pdfium_platform_library_name_at_path("./libs");
-        match Pdfium::bind_to_library(root_path.clone()) {
-            Ok(bindings) => bindings,
-            Err(root_error) => match Pdfium::bind_to_library(libs_path.clone()) {
-                Ok(bindings) => bindings,
-                Err(libs_error) => {
-                    eprintln!("CRITICAL: Could not find PDFium library.");
-                    eprintln!("  Tried: {}", root_path.display());
-                    eprintln!("  Tried: {}", libs_path.display());
-                    eprintln!("  Error from {}: {}", root_path.display(), root_error);
-                    eprintln!("  Error from {}: {}", libs_path.display(), libs_error);
-                    eprintln!("  Set PDFIUM_PATH to the directory containing the library.");
-                    eprintln!(
-                        "  Download prebuilt binaries: https://github.com/bblanchon/pdfium-binaries"
-                    );
-                    std::process::exit(1);
-                }
-            },
-        }
-    };
-
-    let pdfium = Pdfium::new(pdfium_bindings);
     let pdf_path = pdf_path_from_args();
     if !pdf_path.exists() {
         eprintln!(
@@ -107,17 +73,33 @@ fn main() {
         std::process::exit(1);
     }
 
-    let document = pdfium
-        .load_pdf_from_file(&pdf_path, None)
-        .expect("CRITICAL: Failed to open the PDF file.");
+    let pdf_bytes = std::fs::read(&pdf_path).unwrap_or_else(|error| {
+        eprintln!(
+            "CRITICAL: Failed to read PDF file at '{}': {}",
+            pdf_path.display(),
+            error
+        );
+        std::process::exit(1);
+    });
+    let pdf = Pdf::new(pdf_bytes).unwrap_or_else(|error| {
+        eprintln!(
+            "CRITICAL: Failed to parse PDF file at '{}': {:?}",
+            pdf_path.display(),
+            error
+        );
+        std::process::exit(1);
+    });
+    let pdf: &'static Pdf = Box::leak(Box::new(pdf));
+    let interpreter_settings = InterpreterSettings::default();
+    let render_cache: RenderCache<'static> = RenderCache::new();
 
-    let total_pages = document.pages().len();
+    let total_pages = pdf.pages().len();
 
     // Pre-compute page sizes (width, height in points) for layout
     let page_sizes: Vec<(f32, f32)> = (0..total_pages)
         .map(|i| {
-            let page = document.pages().get(i as u16).unwrap();
-            (page.width().value, page.height().value)
+            let page = &pdf.pages()[i];
+            page.render_dimensions()
         })
         .collect();
 
@@ -902,56 +884,33 @@ fn main() {
                                     continue;
                                 }
 
-                                let page = document
-                                    .pages()
-                                    .get(i as u16)
-                                    .expect("Error loading page");
-
-                                // Anti-aliasing: smooth strokes, enhance fine lines, smooth images
-                                let mut render_config = PdfRenderConfig::new()
-                                    .set_target_width(texture_width)
-                                    .set_target_height(texture_height)
-                                    .set_format(PdfBitmapFormat::BGRA)
-                                    .set_reverse_byte_order(false)
-                                    .use_print_quality(true)
-                                    .render_annotations(true)
-                                    .set_clear_color(PdfColor::new(
-                                        255, 255, 255, 255,
-                                    ))
-                                    .use_lcd_text_rendering(lcd_text_rendering);
-
-                                if text_smoothing {
-                                    render_config =
-                                        render_config.set_text_smoothing(true);
-                                }
-                                if path_smoothing {
-                                    render_config =
-                                        render_config.set_path_smoothing(true);
-                                }
-                                if image_smoothing {
-                                    render_config =
-                                        render_config.set_image_smoothing(true);
-                                }
-                                if force_halftone {
-                                    render_config =
-                                        render_config.force_half_tone(true);
-                                }
-
-                                let bitmap = page
-                                    .render_with_config(&render_config)
-                                    .expect("Failed to render page");
+                                let page = &pdf.pages()[i];
+                                let scale_x = texture_width as f32 / pw;
+                                let scale_y = texture_height as f32 / ph;
+                                let render_settings = RenderSettings {
+                                    x_scale: scale_x,
+                                    y_scale: scale_y,
+                                    width: Some(texture_width as u16),
+                                    height: Some(texture_height as u16),
+                                    bg_color: WHITE,
+                                };
+                                let pixmap = render(
+                                    page,
+                                    &render_cache,
+                                    &interpreter_settings,
+                                    &render_settings,
+                                );
 
                                 let image_info = ImageInfo::new(
                                     (texture_width, texture_height),
-                                    ColorType::BGRA8888,
-                                    AlphaType::Unpremul,
+                                    ColorType::RGBA8888,
+                                    AlphaType::Premul,
                                     ColorSpace::new_srgb(),
                                 );
 
-                                let raw_bytes = bitmap.as_raw_bytes();
-                                let row_bytes =
-                                    raw_bytes.len() / texture_height as usize;
-                                let data = Data::new_copy(&raw_bytes);
+                                let raw_bytes = pixmap.data_as_u8_slice();
+                                let row_bytes = texture_width as usize * 4;
+                                let data = Data::new_copy(raw_bytes);
 
                                 page_images[i] =
                                     skia_safe::images::raster_from_data(

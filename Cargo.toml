@@ -9,5 +9,5 @@ raw-window-handle = "0.5"
 skia-safe = { version = "0.75", features = ["vulkan"] }
 ash = "0.37"
 ash-window = "0.12"
-pdfium-render = "0.8"
+hayro = "0.6"
 image = { version = "0.25", default-features = false, features = ["ico"] }
