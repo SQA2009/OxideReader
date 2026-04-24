@@ -81,16 +81,15 @@ fn main() {
         );
         std::process::exit(1);
     });
-    let pdf = Box::leak(Box::new(Pdf::new(pdf_bytes).unwrap_or_else(|error| {
+    let pdf = Pdf::new(pdf_bytes).unwrap_or_else(|error| {
         eprintln!(
             "CRITICAL: Failed to parse PDF file at '{}': {:?}",
             pdf_path.display(),
             error
         );
         std::process::exit(1);
-    })));
+    });
     let interpreter_settings = InterpreterSettings::default();
-    let render_cache: RenderCache<'static> = RenderCache::new();
 
     let total_pages = pdf.pages().len();
 
@@ -835,6 +834,7 @@ fn main() {
                         let is_debouncing = last_zoom_time.is_some();
                         if !is_debouncing {
                             let pages = pdf.pages();
+                            let render_cache = RenderCache::new();
                             for (i, &(page_y, _, _)) in
                                 page_layouts.iter().enumerate()
                             {
