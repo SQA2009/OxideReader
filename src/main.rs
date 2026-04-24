@@ -20,7 +20,7 @@ use skia_safe::gpu::vk as skia_vk;
 use skia_safe::gpu::SurfaceOrigin;
 use skia_safe::{
     font::Edging, AlphaType, Color, Color4f, ColorSpace, ColorType, CubicResampler, Data, Font,
-    FontHinting, FontMgr, FontStyle, Image, ImageInfo, Paint, PathEffect, Pixmap, Point, Rect,
+    FontHinting, FontMgr, FontStyle, Image, ImageInfo, Paint, PathEffect, Point, Rect,
     SamplingOptions,
 };
 
@@ -917,28 +917,19 @@ fn main() {
 
                                 let raw_bytes = pixmap.data_as_u8_slice();
                                 let row_bytes = texture_width as usize * 4;
-                                // Skia's Pixmap requires mutable bytes, so copy hayro output.
-                                let mut pixels = raw_bytes.to_vec();
-                                let skia_pixmap = Pixmap::new(
-                                    &image_info,
-                                    &mut pixels,
-                                    row_bytes,
-                                )
-                                .expect("Failed to create Skia pixmap");
-                                let limit_to_max_texture_size = false;
-                                let gpu_image =
-                                    skia_safe::gpu::images::cross_context_texture_from_pixmap(
+                                let data = Data::new_copy(raw_bytes);
+                                let raster_image = skia_safe::images::raster_from_data(
+                                    &image_info, data, row_bytes,
+                                );
+                                let gpu_image = raster_image.as_ref().and_then(|image| {
+                                    skia_safe::gpu::images::texture_from_image(
                                         &mut gr_context,
-                                        &skia_pixmap,
-                                        false,
-                                        Some(limit_to_max_texture_size),
-                                    );
-                                page_images[i] = gpu_image.or_else(|| {
-                                    let data = Data::new_copy(&pixels);
-                                    skia_safe::images::raster_from_data(
-                                        &image_info, data, row_bytes,
+                                        image,
+                                        skia_safe::gpu::Mipmapped::No,
+                                        skia_safe::gpu::Budgeted::Yes,
                                     )
                                 });
+                                page_images[i] = gpu_image.or(raster_image);
                             }
 
                             // Sync rendered_zoom
