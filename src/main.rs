@@ -909,6 +909,7 @@ fn main() {
 
                                 let image_info = ImageInfo::new(
                                     (texture_width, texture_height),
+                                    // hayro pixmaps are premultiplied RGBA8.
                                     ColorType::RGBA8888,
                                     AlphaType::Premul,
                                     ColorSpace::new_srgb(),
@@ -916,6 +917,7 @@ fn main() {
 
                                 let raw_bytes = pixmap.data_as_u8_slice();
                                 let row_bytes = texture_width as usize * 4;
+                                // Skia's Pixmap requires mutable bytes, so copy hayro output.
                                 let mut pixels = raw_bytes.to_vec();
                                 let skia_pixmap = Pixmap::new(
                                     &image_info,
@@ -923,12 +925,13 @@ fn main() {
                                     row_bytes,
                                 )
                                 .expect("Failed to create Skia pixmap");
+                                let limit_to_max_texture_size = false;
                                 let gpu_image =
                                     skia_safe::gpu::images::cross_context_texture_from_pixmap(
                                         &mut gr_context,
                                         &skia_pixmap,
                                         false,
-                                        Some(false),
+                                        Some(limit_to_max_texture_size),
                                     );
                                 page_images[i] = gpu_image.or_else(|| {
                                     let data = Data::new_copy(&pixels);
@@ -960,8 +963,11 @@ fn main() {
                         );
 
                         // Draw pages
-                        let sampling =
-                            SamplingOptions::from(CubicResampler::catmull_rom());
+                        let sampling = if image_smoothing {
+                            SamplingOptions::from(CubicResampler::catmull_rom())
+                        } else {
+                            SamplingOptions::default()
+                        };
                         let paint = Paint::default();
 
                         for (i, &(page_y, page_w, page_h)) in
