@@ -20,7 +20,7 @@ use skia_safe::gpu::vk as skia_vk;
 use skia_safe::gpu::SurfaceOrigin;
 use skia_safe::{
     font::Edging, AlphaType, Color, Color4f, ColorSpace, ColorType, CubicResampler, Data, Font,
-    FontHinting, FontMgr, FontStyle, Image, ImageInfo, Paint, PathEffect, Point, Rect,
+    FontHinting, FontMgr, FontStyle, Image, ImageInfo, Paint, PathEffect, Pixmap, Point, Rect,
     SamplingOptions,
 };
 
@@ -90,6 +90,7 @@ fn main() {
         std::process::exit(1);
     });
     let interpreter_settings = InterpreterSettings::default();
+    let render_cache = RenderCache::new();
 
     let total_pages = pdf.pages().len();
 
@@ -294,8 +295,6 @@ fn main() {
     let mut zoom_cache: Vec<(i32, u32, u32, u16, Image, Rect)> = Vec::new();
     let mut cached_pdf_image: Option<Image> = None;
 
-    // Antialiasing settings (FreeType text AA and RGB subpixel rendering enabled by default)
-    let mut text_smoothing = true;
     // Antialiasing settings
     let mut text_smoothing = false;
     let mut path_smoothing = false;
@@ -836,7 +835,6 @@ fn main() {
                         let is_debouncing = last_zoom_time.is_some();
                         if !is_debouncing {
                             let pages = pdf.pages();
-                            let render_cache = RenderCache::new();
                             for (i, &(page_y, _, _)) in
                                 page_layouts.iter().enumerate()
                             {
@@ -918,12 +916,26 @@ fn main() {
 
                                 let raw_bytes = pixmap.data_as_u8_slice();
                                 let row_bytes = texture_width as usize * 4;
-                                let data = Data::new_copy(raw_bytes);
-
-                                page_images[i] =
+                                let mut pixels = raw_bytes.to_vec();
+                                let skia_pixmap = Pixmap::new(
+                                    &image_info,
+                                    &mut pixels,
+                                    row_bytes,
+                                )
+                                .expect("Failed to create Skia pixmap");
+                                let gpu_image =
+                                    skia_safe::gpu::images::cross_context_texture_from_pixmap(
+                                        &mut gr_context,
+                                        &skia_pixmap,
+                                        false,
+                                        Some(false),
+                                    );
+                                page_images[i] = gpu_image.or_else(|| {
+                                    let data = Data::new_copy(&pixels);
                                     skia_safe::images::raster_from_data(
                                         &image_info, data, row_bytes,
-                                    );
+                                    )
+                                });
                             }
 
                             // Sync rendered_zoom
