@@ -81,16 +81,16 @@ fn main() {
         );
         std::process::exit(1);
     });
-    let pdf = Pdf::new(pdf_bytes).unwrap_or_else(|error| {
+    let pdf = Box::leak(Box::new(Pdf::new(pdf_bytes).unwrap_or_else(|error| {
         eprintln!(
             "CRITICAL: Failed to parse PDF file at '{}': {:?}",
             pdf_path.display(),
             error
         );
         std::process::exit(1);
-    });
+    })));
     let interpreter_settings = InterpreterSettings::default();
-    let render_cache = RenderCache::new();
+    let render_cache: RenderCache<'static> = RenderCache::new();
 
     let total_pages = pdf.pages().len();
 
