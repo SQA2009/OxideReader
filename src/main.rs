@@ -89,9 +89,7 @@ fn main() {
         );
         std::process::exit(1);
     });
-    let pdf: &'static Pdf = Box::leak(Box::new(pdf));
     let interpreter_settings = InterpreterSettings::default();
-    let render_cache: RenderCache<'static> = RenderCache::new();
 
     let total_pages = pdf.pages().len();
 
@@ -837,6 +835,8 @@ fn main() {
                         // Only render pages when not in the middle of a zoom debounce
                         let is_debouncing = last_zoom_time.is_some();
                         if !is_debouncing {
+                            let pages = pdf.pages();
+                            let render_cache = RenderCache::new();
                             for (i, &(page_y, _, _)) in
                                 page_layouts.iter().enumerate()
                             {
@@ -884,14 +884,22 @@ fn main() {
                                     continue;
                                 }
 
-                                let page = &pdf.pages()[i];
+                                let page = &pages[i];
                                 let scale_x = texture_width as f32 / pw;
                                 let scale_y = texture_height as f32 / ph;
+                                let target_width =
+                                    u16::try_from(texture_width).expect(
+                                        "Render width must fit in u16",
+                                    );
+                                let target_height =
+                                    u16::try_from(texture_height).expect(
+                                        "Render height must fit in u16",
+                                    );
                                 let render_settings = RenderSettings {
                                     x_scale: scale_x,
                                     y_scale: scale_y,
-                                    width: Some(texture_width as u16),
-                                    height: Some(texture_height as u16),
+                                    width: Some(target_width),
+                                    height: Some(target_height),
                                     bg_color: WHITE,
                                 };
                                 let pixmap = render(
