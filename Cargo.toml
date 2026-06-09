@@ -4,10 +4,10 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-winit = { version = "0.29", features = ["rwh_05"] }
-raw-window-handle = "0.5"
-skia-safe = { version = "0.75", features = ["vulkan"] }
-ash = "0.37"
-ash-window = "0.12"
-hayro = "0.6"
-image = { version = "0.25", default-features = false, features = ["ico"] }
+winit = { version = "0.30.13", features = ["rwh_06"] }
+raw-window-handle = "0.6.2"
+skia-safe = { version = "0.97.2", features = ["vulkan"] }
+ash = "0.38.0"
+ash-window = "0.13.0"
+hayro = "0.7.1"
+image = { version = "0.25.10", default-features = false, features = ["ico"] }
