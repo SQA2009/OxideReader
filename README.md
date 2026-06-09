@@ -4,7 +4,7 @@
 
 This code was crafted with the help of **Github Copilot**. So if something doesn't work, feel free to blame the robots. But if it *does* work? That was totally on purpose.
 
-**OxideReader** is the *ultimate* PDF viewer you never knew you needed—because who doesn't want to *destroy* Adobe Acrobat Pro with a Rust program? Built with **pdfium-render** for high-fidelity PDF rendering and **Skia** for blazing-fast GPU-accelerated drawing, this tool is designed to be a *sleek* (or at least *functional*) alternative to the bloated giants of the PDF world. The old Python prototype days are over—welcome to the Rust era.
+**OxideReader** is the *ultimate* PDF viewer you never knew you needed—because who doesn't want to *destroy* Adobe Acrobat Pro with a Rust program? Built with **hayro** for pure-Rust PDF rendering and **Skia** with Vulkan for blazing-fast GPU-accelerated drawing, this tool is designed to be a *sleek* (or at least *functional*) alternative to the bloated giants of the PDF world. The old Python prototype days are over—welcome to the Rust era.
 
 > **Note:** The previous Python versions (`acrobatprokiller.py`, `pdf31.py`, and all earlier iterations) have been archived under the [`Archive/`](./Archive/) folder for historical reference.
 
@@ -12,7 +12,7 @@ This code was crafted with the help of **Github Copilot**. So if something doesn
 
 ## Features
 
-- **Fast PDF Rendering:** Hardware-accelerated rendering via OpenGL + Skia. It actually opens PDFs quickly.
+- **Fast PDF Rendering:** Pure-Rust PDF rasterization via hayro with GPU-accelerated display via Skia + Vulkan.
 - **Smooth Zoom:** Mouse-wheel zoom and `+`/`-` keyboard shortcuts. Reset to 100% with `0`.
 - **Pan Support:** Click and drag to pan around large pages.
 - **Page Navigation:** Use `←` / `→` arrow keys to flip through pages.
@@ -24,9 +24,8 @@ This code was crafted with the help of **Github Copilot**. So if something doesn
 ## Requirements
 
 - [Rust toolchain](https://rustup.rs/) (stable, 1.70+)
-- A copy of the **PDFium** shared library (`pdfium.dll` on Windows, `libpdfium.so` on Linux, `libpdfium.dylib` on macOS) placed next to the compiled binary or in a `libs/` subfolder. You can also set `PDFIUM_PATH` to the directory containing the library.  
-  Pre-built binaries are available from the [pdfium-binaries](https://github.com/bblanchon/pdfium-binaries) project.
-- A GPU driver that supports **OpenGL**.
+- No external PDFium library required (rendering is pure Rust).
+- A GPU driver that supports **Vulkan**.
 
 ---
 
@@ -39,21 +38,7 @@ git clone https://github.com/SQA2009/RustifyFlow.git
 cd RustifyFlow
 ```
 
-### 2. Place the PDFium Library
-
-Copy the appropriate PDFium shared library into the project root (next to `Cargo.toml`), or into a `libs/` subfolder:
-
-```
-RustifyFlow/
-├── pdfium.dll      <- Windows example
-├── Cargo.toml
-└── src/
-    └── main.rs
-```
-
-You can also set `PDFIUM_PATH` to the directory that contains the library instead of copying it.
-
-### 3. Build the Project
+### 2. Build the Project
 
 ```bash
 cargo build --release
@@ -108,11 +93,9 @@ Or run the compiled binary directly:
    cd RustifyFlow
    ```
 
-3. **Add the PDFium library** to the project root (see Requirements above).
+3. **Drop in a test PDF** named `test.pdf`, or plan to pass a PDF path as the first argument.
 
-4. **Drop in a test PDF** named `test.pdf`, or plan to pass a PDF path as the first argument.
-
-5. **Build and run:**
+4. **Build and run:**
    ```bash
    cargo run --release
    ```
@@ -145,8 +128,7 @@ Feel like making this mess better? Go ahead, fork it. Submit a pull request. Or 
 | [**raw-window-handle**](https://github.com/rust-windowing/raw-window-handle) | Cross-platform raw window handle abstraction | 0.5 |
 | [**skia-safe**](https://github.com/rust-skia/rust-skia) | Rust bindings for the Skia 2D graphics library | 0.75 |
 | [**gl**](https://github.com/brendanzab/gl-rs) | OpenGL function pointer loader | 0.14 |
-| [**pdfium-render**](https://github.com/ajrcarey/pdfium-render) | Rust bindings for Google's PDFium library | 0.8 |
-| [**PDFium**](https://pdfium.googlesource.com/pdfium/) | Google's open-source PDF rendering engine (bundled as `pdfium.dll`) | — |
+| [**hayro**](https://github.com/LaurenzV/hayro) | Pure-Rust PDF interpreter and renderer | 0.6 |
 
 ---
 
