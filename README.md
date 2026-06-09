@@ -34,8 +34,8 @@ This code was crafted with the help of **Github Copilot**. So if something doesn
 ### 1. Clone the Repository
 
 ```bash
-git clone https://github.com/SQA2009/RustifyFlow.git
-cd RustifyFlow
+git clone https://github.com/SQA2009/OxideReader.git
+cd OxideReader
 ```
 
 ### 2. Build the Project
