@@ -30,7 +30,7 @@ use hayro::vello_cpu::color::palette::css::WHITE;
 use hayro::{render, RenderCache, RenderSettings};
 
 const MAX_TEXTURE_SIZE: i32 = 16384;
-const ZOOM_DEBOUNCE_MS: u64 = 150;
+const ZOOM_DEBOUNCE_MS: u64 = 50;
 const ZOOM_FACTOR: f32 = 1.10;
 /// Multiplier to convert internal zoom_level to displayed zoom percentage.
 /// At zoom_level=1.0 the page fits the window width, which corresponds to ~77.4% of the PDF's native size.
@@ -314,6 +314,7 @@ fn main() {
     window.set_cursor_icon(CursorIcon::Grab);
 
     // 6. Run Loop
+
     event_loop
         .run(move |event, target| {
             // Only go to sleep when no zoom timer is pending; otherwise
