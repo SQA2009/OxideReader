@@ -314,6 +314,7 @@ fn main() {
     window.set_cursor_icon(CursorIcon::Grab);
 
     // 6. Run Loop
+
     event_loop
         .run(move |event, target| {
             // Only go to sleep when no zoom timer is pending; otherwise
