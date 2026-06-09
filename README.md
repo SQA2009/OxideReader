@@ -122,13 +122,13 @@ Feel like making this mess better? Go ahead, fork it. Submit a pull request. Or 
 
 | Crate / Library | Description | Version |
 |-----------------|-------------|---------|
-| [**winit**](https://github.com/rust-windowing/winit) | Cross-platform window creation and event handling | 0.29 |
+| [**winit**](https://github.com/rust-windowing/winit) | Cross-platform window creation and event handling | 0.30 |
 | [**glutin**](https://github.com/rust-windowing/glutin) | OpenGL context creation | 0.31 |
 | [**glutin-winit**](https://github.com/rust-windowing/glutin) | Glutin + Winit integration helpers | 0.4 |
-| [**raw-window-handle**](https://github.com/rust-windowing/raw-window-handle) | Cross-platform raw window handle abstraction | 0.5 |
-| [**skia-safe**](https://github.com/rust-skia/rust-skia) | Rust bindings for the Skia 2D graphics library | 0.75 |
+| [**raw-window-handle**](https://github.com/rust-windowing/raw-window-handle) | Cross-platform raw window handle abstraction | 0.6 |
+| [**skia-safe**](https://github.com/rust-skia/rust-skia) | Rust bindings for the Skia 2D graphics library | 0.97 |
 | [**gl**](https://github.com/brendanzab/gl-rs) | OpenGL function pointer loader | 0.14 |
-| [**hayro**](https://github.com/LaurenzV/hayro) | Pure-Rust PDF interpreter and renderer | 0.6 |
+| [**hayro**](https://github.com/LaurenzV/hayro) | Pure-Rust PDF interpreter and renderer | 0.7 |
 
 ---
 
