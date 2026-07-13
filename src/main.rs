@@ -5,11 +5,11 @@ use std::sync::Arc;
 use hayro::hayro_interpret::InterpreterSettings;
 use hayro::hayro_syntax::Pdf;
 use hayro::vello_cpu::color::palette::css::WHITE;
-use hayro::{render, RenderCache, RenderSettings};
+use hayro::{render, RenderSettings};
 use vello::kurbo::{Affine, Rect};
 use vello::peniko::{Blob, Color, Fill, ImageAlphaType, ImageBrush, ImageData, ImageFormat};
 use vello::util::{RenderContext, RenderSurface};
-use vello::wgpu::{self, CurrentSurfaceTexture};
+use vello::wgpu::{self, SurfaceError};
 use vello::{AaConfig, RenderParams, Renderer, RendererOptions, Scene};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -41,7 +41,6 @@ struct App {
     pdf: Pdf,
     page_sizes: Vec<(f32, f32)>,
     interpreter_settings: InterpreterSettings,
-    render_cache: RenderCache,
 
     context: RenderContext,
     renderer: Vec<Option<Renderer>>,
@@ -63,7 +62,6 @@ impl App {
             pdf,
             page_sizes,
             interpreter_settings: InterpreterSettings::default(),
-            render_cache: RenderCache::new(),
             context: RenderContext::new(),
             renderer: Vec::new(),
             render_state: None,
@@ -136,18 +134,14 @@ impl App {
         let render_settings = RenderSettings {
             x_scale: target_width as f32 / page_w,
             y_scale: target_height as f32 / page_h,
-            width: Some(
-                u16::try_from(target_width).expect("Page render width must fit in u16"),
-            ),
-            height: Some(
-                u16::try_from(target_height).expect("Page render height must fit in u16"),
-            ),
+            width: Some(u16::try_from(target_width).expect("Page render width must fit in u16")),
+            height: Some(u16::try_from(target_height).expect("Page render height must fit in u16")),
             bg_color: WHITE,
         };
 
         let pixmap = render(
             page,
-            &self.render_cache,
+            &hayro::RenderCache::new(),
             &self.interpreter_settings,
             &render_settings,
         );
@@ -170,17 +164,27 @@ impl App {
     }
 
     fn draw_frame(&mut self) {
-        let Some(state) = &mut self.render_state else {
+        let Some((width, height, valid_surface, dev_id)) =
+            self.render_state.as_ref().map(|state| {
+                (
+                    state.surface.config.width,
+                    state.surface.config.height,
+                    state.valid_surface,
+                    state.surface.dev_id,
+                )
+            })
+        else {
             return;
         };
-        if !state.valid_surface {
+        if !valid_surface {
             return;
         }
 
-        self.ensure_page_image(state.surface.config.width, state.surface.config.height);
-
-        let width = state.surface.config.width;
-        let height = state.surface.config.height;
+        self.ensure_page_image(width, height);
+        let state = self
+            .render_state
+            .as_mut()
+            .expect("Render state should exist during draw");
 
         self.scene.reset();
         self.scene.fill(
@@ -198,8 +202,8 @@ impl App {
                 .draw_image(&cached.image, Affine::translate((x as f64, y as f64)));
         }
 
-        let device_handle = &self.context.devices[state.surface.dev_id];
-        let renderer = self.renderer[state.surface.dev_id]
+        let device_handle = &self.context.devices[dev_id];
+        let renderer = self.renderer[dev_id]
             .as_mut()
             .expect("Renderer should be initialized");
 
@@ -219,19 +223,25 @@ impl App {
             .expect("failed to render frame with vello");
 
         let surface_texture = match state.surface.surface.get_current_texture() {
-            CurrentSurfaceTexture::Success(surface_texture) => surface_texture,
-            CurrentSurfaceTexture::Outdated | CurrentSurfaceTexture::Suboptimal(_) => {
-                self.context.configure_surface(&state.surface);
+            Ok(surface_texture) => surface_texture,
+            Err(SurfaceError::Outdated) | Err(SurfaceError::Lost) => {
+                let width = state.surface.config.width;
+                let height = state.surface.config.height;
+                self.context
+                    .resize_surface(&mut state.surface, width, height);
                 state.window.request_redraw();
                 return;
             }
-            CurrentSurfaceTexture::Occluded | CurrentSurfaceTexture::Timeout => {
+            Err(SurfaceError::Timeout) => {
                 state.window.request_redraw();
                 return;
             }
-            CurrentSurfaceTexture::Lost => panic!("surface lost"),
-            CurrentSurfaceTexture::Validation => {
-                panic!("surface validation error")
+            Err(SurfaceError::OutOfMemory) => {
+                panic!("surface out of memory")
+            }
+            Err(SurfaceError::Other) => {
+                state.window.request_redraw();
+                return;
             }
         };
 
@@ -293,8 +303,11 @@ impl ApplicationHandler for App {
             .resize_with(self.context.devices.len(), || None);
         let dev_id = surface.dev_id;
         self.renderer[dev_id].get_or_insert_with(|| {
-            Renderer::new(&self.context.devices[dev_id].device, RendererOptions::default())
-                .expect("failed to create vello renderer")
+            Renderer::new(
+                &self.context.devices[dev_id].device,
+                RendererOptions::default(),
+            )
+            .expect("failed to create vello renderer")
         });
 
         self.render_state = Some(RenderState {
@@ -310,10 +323,10 @@ impl ApplicationHandler for App {
         window_id: winit::window::WindowId,
         event: WindowEvent,
     ) {
-        let Some(state) = &mut self.render_state else {
+        let Some(current_window_id) = self.render_state.as_ref().map(|s| s.window.id()) else {
             return;
         };
-        if state.window.id() != window_id {
+        if current_window_id != window_id {
             return;
         }
 
@@ -321,14 +334,20 @@ impl ApplicationHandler for App {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
                 if size.width > 0 && size.height > 0 {
-                    self.context
-                        .resize_surface(&mut state.surface, size.width, size.height);
-                    state.valid_surface = true;
                     self.invalidate_cached_page();
+                    if let Some(state) = &mut self.render_state {
+                        self.context
+                            .resize_surface(&mut state.surface, size.width, size.height);
+                        state.valid_surface = true;
+                    }
                 } else {
-                    state.valid_surface = false;
+                    if let Some(state) = &mut self.render_state {
+                        state.valid_surface = false;
+                    }
                 }
-                state.window.request_redraw();
+                if let Some(state) = &self.render_state {
+                    state.window.request_redraw();
+                }
             }
             WindowEvent::RedrawRequested => {
                 self.draw_frame();
@@ -349,7 +368,9 @@ impl ApplicationHandler for App {
                         self.pan.0 += (position.x - last_x) as f32;
                         self.pan.1 += (position.y - last_y) as f32;
                     }
-                    state.window.request_redraw();
+                    if let Some(state) = &self.render_state {
+                        state.window.request_redraw();
+                    }
                 }
                 self.last_cursor = Some((position.x, position.y));
             }
@@ -363,8 +384,10 @@ impl ApplicationHandler for App {
                 } else if y < 0.0 {
                     self.zoom_by(1.0 / ZOOM_STEP);
                 }
-                self.update_title(&state.window);
-                state.window.request_redraw();
+                if let Some(state) = &self.render_state {
+                    self.update_title(&state.window);
+                    state.window.request_redraw();
+                }
             }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 match event.logical_key.as_ref() {
@@ -385,8 +408,10 @@ impl ApplicationHandler for App {
                     }
                     _ => {}
                 }
-                self.update_title(&state.window);
-                state.window.request_redraw();
+                if let Some(state) = &self.render_state {
+                    self.update_title(&state.window);
+                    state.window.request_redraw();
+                }
             }
             _ => {}
         }
@@ -440,7 +465,9 @@ fn main() {
 
     let event_loop = EventLoop::new().expect("failed to create event loop");
     let mut app = App::new(pdf, page_sizes);
-    event_loop.run_app(&mut app).expect("event loop exited with error");
+    event_loop
+        .run_app(&mut app)
+        .expect("event loop exited with error");
 }
 
 fn window_attributes(icon: Option<Icon>) -> WindowAttributes {
