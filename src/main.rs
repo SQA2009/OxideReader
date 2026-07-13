@@ -294,7 +294,8 @@ impl App {
         display_h: f32,
     ) -> Vec<DisplayItem> {
         let desired_lod = Self::lod_for_zoom(self.zoom);
-        let desired_key = self.make_cache_key_for_lod(width, height, display_w, display_h, desired_lod);
+        let desired_key =
+            self.make_cache_key_for_lod(width, height, display_w, display_h, desired_lod);
         let Some(best_key) =
             self.select_best_cached_key(desired_lod, desired_key.width, desired_key.height)
         else {
@@ -351,14 +352,16 @@ impl App {
     fn draw_frame(&mut self) {
         self.poll_worker_responses();
 
-        let Some((width, height, valid_surface, dev_id)) = self.render_state.as_ref().map(|state| {
-            (
-                state.surface.config.width,
-                state.surface.config.height,
-                state.valid_surface,
-                state.surface.dev_id,
-            )
-        }) else {
+        let Some((width, height, valid_surface, dev_id)) =
+            self.render_state.as_ref().map(|state| {
+                (
+                    state.surface.config.width,
+                    state.surface.config.height,
+                    state.valid_surface,
+                    state.surface.dev_id,
+                )
+            })
+        else {
             return;
         };
         if !valid_surface {
@@ -642,17 +645,16 @@ fn spawn_render_worker(pdf_bytes: Vec<u8>) -> (Sender<WorkerRequest>, Receiver<W
                         x_scale: key.width as f32 / page_w,
                         y_scale: key.height as f32 / page_h,
                         width: Some(
-                            u16::try_from(key.width)
-                                .expect("Page render width must fit in u16"),
+                            u16::try_from(key.width).expect("Page render width must fit in u16"),
                         ),
                         height: Some(
-                            u16::try_from(key.height)
-                                .expect("Page render height must fit in u16"),
+                            u16::try_from(key.height).expect("Page render height must fit in u16"),
                         ),
                         bg_color: WHITE,
                     };
 
-                    let pixmap = render(page, &render_cache, &interpreter_settings, &render_settings);
+                    let pixmap =
+                        render(page, &render_cache, &interpreter_settings, &render_settings);
                     let rgba = pixmap.data_as_u8_slice().to_vec();
 
                     if response_tx.send(WorkerResponse { key, rgba }).is_err() {
