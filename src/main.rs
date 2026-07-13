@@ -1,6 +1,7 @@
 use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use hayro::hayro_interpret::InterpreterSettings;
 use hayro::hayro_syntax::Pdf;
@@ -23,6 +24,9 @@ const ZOOM_STEP: f32 = 1.10;
 const MIN_ZOOM: f32 = 0.1;
 const MAX_ZOOM: f32 = 8.0;
 const MAX_TEXTURE_SIZE: u32 = 8192;
+const RASTER_OVERSAMPLE: f32 = 1.2;
+const RERASTERIZE_THRESHOLD: f32 = 0.12;
+const INTERACTION_SETTLE_DELAY: Duration = Duration::from_millis(120);
 
 struct CachedPageImage {
     page_index: usize,
@@ -54,6 +58,8 @@ struct App {
     pan: (f32, f32),
     dragging: bool,
     last_cursor: Option<(f64, f64)>,
+    pending_high_quality_render: bool,
+    last_view_change: Instant,
 }
 
 impl App {
@@ -72,6 +78,8 @@ impl App {
             pan: (0.0, 0.0),
             dragging: false,
             last_cursor: None,
+            pending_high_quality_render: true,
+            last_view_change: Instant::now(),
         }
     }
 
@@ -86,9 +94,15 @@ impl App {
 
     fn invalidate_cached_page(&mut self) {
         self.cached_page = None;
+        self.pending_high_quality_render = true;
     }
 
-    fn current_target_size(&self, width: u32, height: u32) -> (u32, u32) {
+    fn mark_view_changed(&mut self) {
+        self.pending_high_quality_render = true;
+        self.last_view_change = Instant::now();
+    }
+
+    fn current_display_size(&self, width: u32, height: u32) -> (f32, f32) {
         let viewport_w = width.max(1) as f32;
         let viewport_h = height.max(1) as f32;
         let (page_w, page_h) = self.page_sizes[self.page_index];
@@ -96,9 +110,15 @@ impl App {
 
         let fit_w = viewport_w * 0.9;
         let fit_h = viewport_h * 0.9;
-        let mut target_w = fit_w.min(fit_h * page_aspect) * self.zoom;
-        let mut target_h = target_w / page_aspect;
+        let display_w = fit_w.min(fit_h * page_aspect) * self.zoom;
+        let display_h = display_w / page_aspect;
 
+        (display_w.max(1.0), display_h.max(1.0))
+    }
+
+    fn target_texture_size(&self, display_w: f32, display_h: f32) -> (u32, u32) {
+        let mut target_w = display_w * RASTER_OVERSAMPLE;
+        let mut target_h = display_h * RASTER_OVERSAMPLE;
         if target_h > MAX_TEXTURE_SIZE as f32 {
             let scale = MAX_TEXTURE_SIZE as f32 / target_h;
             target_h *= scale;
@@ -117,15 +137,33 @@ impl App {
     }
 
     fn ensure_page_image(&mut self, width: u32, height: u32) {
-        let (target_width, target_height) = self.current_target_size(width, height);
+        let (display_width, display_height) = self.current_display_size(width, height);
+        let (target_width, target_height) = self.target_texture_size(display_width, display_height);
+        let settled = self.last_view_change.elapsed() >= INTERACTION_SETTLE_DELAY;
 
         if let Some(cached) = &self.cached_page {
-            if cached.page_index == self.page_index
-                && cached.target_width == target_width
-                && cached.target_height == target_height
-            {
-                return;
+            if cached.page_index == self.page_index {
+                let width_delta = 1.0 - (target_width as f32 / cached.target_width.max(1) as f32);
+                let height_delta =
+                    1.0 - (target_height as f32 / cached.target_height.max(1) as f32);
+                let close_enough =
+                    width_delta.abs().max(height_delta.abs()) <= RERASTERIZE_THRESHOLD;
+
+                if close_enough {
+                    if settled {
+                        self.pending_high_quality_render = false;
+                    }
+                    return;
+                }
+
+                if !settled {
+                    return;
+                }
             }
+        }
+
+        if !self.pending_high_quality_render {
+            return;
         }
 
         let pages = self.pdf.pages();
@@ -161,6 +199,7 @@ impl App {
             target_height,
             image: image_data.into(),
         });
+        self.pending_high_quality_render = false;
     }
 
     fn draw_frame(&mut self) {
@@ -181,6 +220,7 @@ impl App {
         }
 
         self.ensure_page_image(width, height);
+        let (display_width, display_height) = self.current_display_size(width, height);
         let state = self
             .render_state
             .as_mut()
@@ -196,10 +236,14 @@ impl App {
         );
 
         if let Some(cached) = &self.cached_page {
-            let x = (width as f32 - cached.target_width as f32) * 0.5 + self.pan.0;
-            let y = (height as f32 - cached.target_height as f32) * 0.5 + self.pan.1;
-            self.scene
-                .draw_image(&cached.image, Affine::translate((x as f64, y as f64)));
+            let x = (width as f32 - display_width) * 0.5 + self.pan.0;
+            let y = (height as f32 - display_height) * 0.5 + self.pan.1;
+            let scale_x = display_width / cached.target_width.max(1) as f32;
+            let scale_y = display_height / cached.target_height.max(1) as f32;
+            self.scene.draw_image(
+                &cached.image,
+                Affine::new([scale_x as f64, 0.0, 0.0, scale_y as f64, x as f64, y as f64]),
+            );
         }
 
         let device_handle = &self.context.devices[dev_id];
@@ -265,7 +309,7 @@ impl App {
 
     fn zoom_by(&mut self, factor: f32) {
         self.zoom = (self.zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
-        self.invalidate_cached_page();
+        self.mark_view_changed();
     }
 
     fn go_to_page(&mut self, page_index: usize) {
@@ -334,7 +378,7 @@ impl ApplicationHandler for App {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
                 if size.width > 0 && size.height > 0 {
-                    self.invalidate_cached_page();
+                    self.mark_view_changed();
                     if let Some(state) = &mut self.render_state {
                         self.context
                             .resize_surface(&mut state.surface, size.width, size.height);
@@ -404,7 +448,7 @@ impl ApplicationHandler for App {
                     Key::Character("0") => {
                         self.zoom = 1.0;
                         self.pan = (0.0, 0.0);
-                        self.invalidate_cached_page();
+                        self.mark_view_changed();
                     }
                     _ => {}
                 }
@@ -419,7 +463,11 @@ impl ApplicationHandler for App {
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
         if let Some(state) = &self.render_state {
-            state.window.request_redraw();
+            if self.pending_high_quality_render
+                && self.last_view_change.elapsed() >= INTERACTION_SETTLE_DELAY
+            {
+                state.window.request_redraw();
+            }
         }
     }
 }
