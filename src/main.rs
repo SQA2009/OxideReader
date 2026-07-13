@@ -1,7 +1,9 @@
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::thread;
 
 use hayro::hayro_interpret::InterpreterSettings;
 use hayro::hayro_syntax::Pdf;
@@ -24,15 +26,51 @@ const ZOOM_STEP: f32 = 1.10;
 const MIN_ZOOM: f32 = 0.1;
 const MAX_ZOOM: f32 = 8.0;
 const MAX_TEXTURE_SIZE: u32 = 8192;
-const RASTER_OVERSAMPLE: f32 = 1.2;
-const RERASTERIZE_THRESHOLD: f32 = 0.12;
-const INTERACTION_SETTLE_DELAY: Duration = Duration::from_millis(120);
+const REQUEST_OVERSAMPLE: f32 = 1.15;
+const TILE_SIZE: u32 = 512;
+const DIM_QUANTIZE: u32 = 128;
+const MAX_LOD_LEVEL: u8 = 2;
+const MAX_CACHE_BYTES: usize = 256 * 1024 * 1024;
 
-struct CachedPageImage {
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+struct CacheKey {
     page_index: usize,
-    target_width: u32,
-    target_height: u32,
+    lod: u8,
+    width: u32,
+    height: u32,
+}
+
+#[derive(Clone)]
+struct CachedTile {
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
     image: ImageBrush,
+}
+
+struct CachedPageLevel {
+    key: CacheKey,
+    full_width: u32,
+    full_height: u32,
+    tiles: Vec<CachedTile>,
+    bytes: usize,
+    last_used_tick: u64,
+}
+
+struct DisplayItem {
+    image: ImageBrush,
+    transform: Affine,
+}
+
+enum WorkerRequest {
+    Render(CacheKey),
+    Shutdown,
+}
+
+struct WorkerResponse {
+    key: CacheKey,
+    rgba: Vec<u8>,
 }
 
 struct RenderState {
@@ -42,44 +80,57 @@ struct RenderState {
 }
 
 struct App {
-    pdf: Pdf,
     page_sizes: Vec<(f32, f32)>,
-    interpreter_settings: InterpreterSettings,
 
     context: RenderContext,
     renderer: Vec<Option<Renderer>>,
     render_state: Option<RenderState>,
 
     scene: Scene,
-    cached_page: Option<CachedPageImage>,
+
+    page_cache: HashMap<CacheKey, CachedPageLevel>,
+    pending_requests: HashSet<CacheKey>,
+    cache_bytes: usize,
+    usage_tick: u64,
+
+    worker_tx: Sender<WorkerRequest>,
+    worker_rx: Receiver<WorkerResponse>,
 
     page_index: usize,
     zoom: f32,
     pan: (f32, f32),
     dragging: bool,
     last_cursor: Option<(f64, f64)>,
-    pending_high_quality_render: bool,
-    last_view_change: Instant,
+    view_dirty: bool,
+}
+
+impl Drop for App {
+    fn drop(&mut self) {
+        let _ = self.worker_tx.send(WorkerRequest::Shutdown);
+    }
 }
 
 impl App {
-    fn new(pdf: Pdf, page_sizes: Vec<(f32, f32)>) -> Self {
+    fn new(pdf_bytes: Vec<u8>, page_sizes: Vec<(f32, f32)>) -> Self {
+        let (worker_tx, worker_rx) = spawn_render_worker(pdf_bytes);
         Self {
-            pdf,
             page_sizes,
-            interpreter_settings: InterpreterSettings::default(),
             context: RenderContext::new(),
             renderer: Vec::new(),
             render_state: None,
             scene: Scene::new(),
-            cached_page: None,
+            page_cache: HashMap::new(),
+            pending_requests: HashSet::new(),
+            cache_bytes: 0,
+            usage_tick: 0,
+            worker_tx,
+            worker_rx,
             page_index: 0,
             zoom: 1.0,
             pan: (0.0, 0.0),
             dragging: false,
             last_cursor: None,
-            pending_high_quality_render: true,
-            last_view_change: Instant::now(),
+            view_dirty: true,
         }
     }
 
@@ -92,14 +143,8 @@ impl App {
         ));
     }
 
-    fn invalidate_cached_page(&mut self) {
-        self.cached_page = None;
-        self.pending_high_quality_render = true;
-    }
-
     fn mark_view_changed(&mut self) {
-        self.pending_high_quality_render = true;
-        self.last_view_change = Instant::now();
+        self.view_dirty = true;
     }
 
     fn current_display_size(&self, width: u32, height: u32) -> (f32, f32) {
@@ -116,111 +161,217 @@ impl App {
         (display_w.max(1.0), display_h.max(1.0))
     }
 
-    fn target_texture_size(&self, display_w: f32, display_h: f32) -> (u32, u32) {
-        let mut target_w = display_w * RASTER_OVERSAMPLE;
-        let mut target_h = display_h * RASTER_OVERSAMPLE;
-        if target_h > MAX_TEXTURE_SIZE as f32 {
-            let scale = MAX_TEXTURE_SIZE as f32 / target_h;
-            target_h *= scale;
-            target_w *= scale;
+    fn lod_for_zoom(zoom: f32) -> u8 {
+        if zoom < 0.65 {
+            2
+        } else if zoom < 1.6 {
+            1
+        } else {
+            0
         }
-        if target_w > MAX_TEXTURE_SIZE as f32 {
-            let scale = MAX_TEXTURE_SIZE as f32 / target_w;
-            target_w *= scale;
-            target_h *= scale;
-        }
-
-        (
-            target_w.round().clamp(32.0, MAX_TEXTURE_SIZE as f32) as u32,
-            target_h.round().clamp(32.0, MAX_TEXTURE_SIZE as f32) as u32,
-        )
     }
 
-    fn ensure_page_image(&mut self, width: u32, height: u32) {
-        let (display_width, display_height) = self.current_display_size(width, height);
-        let (target_width, target_height) = self.target_texture_size(display_width, display_height);
-        let settled = self.last_view_change.elapsed() >= INTERACTION_SETTLE_DELAY;
+    fn quantize_dim(value: u32) -> u32 {
+        let quantized = value.div_ceil(DIM_QUANTIZE) * DIM_QUANTIZE;
+        quantized.clamp(32, MAX_TEXTURE_SIZE)
+    }
 
-        if let Some(cached) = &self.cached_page {
-            if cached.page_index == self.page_index {
-                let width_delta = 1.0 - (target_width as f32 / cached.target_width.max(1) as f32);
-                let height_delta =
-                    1.0 - (target_height as f32 / cached.target_height.max(1) as f32);
-                let close_enough =
-                    width_delta.abs().max(height_delta.abs()) <= RERASTERIZE_THRESHOLD;
+    fn make_cache_key_for_lod(
+        &self,
+        width: u32,
+        height: u32,
+        display_w: f32,
+        display_h: f32,
+        lod: u8,
+    ) -> CacheKey {
+        let lod_scale = 1.0 / ((1u32 << lod) as f32);
+        let requested_w = (display_w * REQUEST_OVERSAMPLE * lod_scale)
+            .round()
+            .clamp(32.0, MAX_TEXTURE_SIZE as f32) as u32;
+        let requested_h = (display_h * REQUEST_OVERSAMPLE * lod_scale)
+            .round()
+            .clamp(32.0, MAX_TEXTURE_SIZE as f32) as u32;
 
-                if close_enough {
-                    if settled {
-                        self.pending_high_quality_render = false;
-                    }
-                    return;
-                }
+        let requested_w = requested_w.min(width.max(32));
+        let requested_h = requested_h.min(height.max(32));
 
-                if !settled {
-                    return;
-                }
+        CacheKey {
+            page_index: self.page_index,
+            lod,
+            width: Self::quantize_dim(requested_w),
+            height: Self::quantize_dim(requested_h),
+        }
+    }
+
+    fn request_render_for_view(&mut self, width: u32, height: u32) {
+        let (display_w, display_h) = self.current_display_size(width, height);
+        let desired_lod = Self::lod_for_zoom(self.zoom);
+
+        let mut lod_sequence = Vec::with_capacity(3);
+        lod_sequence.push(desired_lod);
+        if desired_lod < MAX_LOD_LEVEL {
+            lod_sequence.push(desired_lod + 1);
+        }
+        if desired_lod > 0 {
+            lod_sequence.push(desired_lod - 1);
+        }
+
+        for lod in lod_sequence {
+            let key = self.make_cache_key_for_lod(width, height, display_w, display_h, lod);
+            if self.page_cache.contains_key(&key) || self.pending_requests.contains(&key) {
+                continue;
+            }
+
+            if self.worker_tx.send(WorkerRequest::Render(key)).is_ok() {
+                self.pending_requests.insert(key);
             }
         }
 
-        if !self.pending_high_quality_render {
-            return;
+        self.view_dirty = false;
+    }
+
+    fn poll_worker_responses(&mut self) {
+        while let Ok(response) = self.worker_rx.try_recv() {
+            self.pending_requests.remove(&response.key);
+            self.insert_cached_level(response);
+        }
+    }
+
+    fn insert_cached_level(&mut self, response: WorkerResponse) {
+        if let Some(old) = self.page_cache.remove(&response.key) {
+            self.cache_bytes = self.cache_bytes.saturating_sub(old.bytes);
         }
 
-        let pages = self.pdf.pages();
-        let page = &pages[self.page_index];
-        let (page_w, page_h) = self.page_sizes[self.page_index];
-        let render_settings = RenderSettings {
-            x_scale: target_width as f32 / page_w,
-            y_scale: target_height as f32 / page_h,
-            width: Some(u16::try_from(target_width).expect("Page render width must fit in u16")),
-            height: Some(u16::try_from(target_height).expect("Page render height must fit in u16")),
-            bg_color: WHITE,
+        let cached_level = build_tiled_level(response, self.usage_tick);
+        self.usage_tick = self.usage_tick.wrapping_add(1);
+
+        self.cache_bytes = self.cache_bytes.saturating_add(cached_level.bytes);
+        self.page_cache.insert(cached_level.key, cached_level);
+        self.evict_cache_if_needed();
+    }
+
+    fn evict_cache_if_needed(&mut self) {
+        while self.cache_bytes > MAX_CACHE_BYTES {
+            let oldest_key = self
+                .page_cache
+                .iter()
+                .min_by_key(|(_, level)| level.last_used_tick)
+                .map(|(key, _)| *key);
+
+            let Some(oldest_key) = oldest_key else {
+                break;
+            };
+
+            if let Some(removed) = self.page_cache.remove(&oldest_key) {
+                self.cache_bytes = self.cache_bytes.saturating_sub(removed.bytes);
+            }
+        }
+    }
+
+    fn select_best_cached_key(
+        &self,
+        desired_lod: u8,
+        desired_width: u32,
+        desired_height: u32,
+    ) -> Option<CacheKey> {
+        self.page_cache
+            .iter()
+            .filter(|(key, _)| key.page_index == self.page_index)
+            .min_by_key(|(key, _)| {
+                let lod_score = (i32::from(key.lod) - i32::from(desired_lod)).abs() as u64 * 10_000;
+                let width_score = key.width.abs_diff(desired_width) as u64;
+                let height_score = key.height.abs_diff(desired_height) as u64;
+                lod_score + width_score + height_score
+            })
+            .map(|(key, _)| *key)
+    }
+
+    fn build_display_list(
+        &mut self,
+        width: u32,
+        height: u32,
+        display_w: f32,
+        display_h: f32,
+    ) -> Vec<DisplayItem> {
+        let desired_lod = Self::lod_for_zoom(self.zoom);
+        let desired_key = self.make_cache_key_for_lod(width, height, display_w, display_h, desired_lod);
+        let Some(best_key) =
+            self.select_best_cached_key(desired_lod, desired_key.width, desired_key.height)
+        else {
+            return Vec::new();
         };
 
-        let pixmap = render(
-            page,
-            &hayro::RenderCache::new(),
-            &self.interpreter_settings,
-            &render_settings,
-        );
-
-        let rgba = Arc::new(pixmap.data_as_u8_slice().to_vec());
-        let image_data = ImageData {
-            data: Blob::new(rgba),
-            format: ImageFormat::Rgba8,
-            width: target_width,
-            height: target_height,
-            alpha_type: ImageAlphaType::Alpha,
+        let Some(level) = self.page_cache.get_mut(&best_key) else {
+            return Vec::new();
         };
+        level.last_used_tick = self.usage_tick;
+        self.usage_tick = self.usage_tick.wrapping_add(1);
 
-        self.cached_page = Some(CachedPageImage {
-            page_index: self.page_index,
-            target_width,
-            target_height,
-            image: image_data.into(),
-        });
-        self.pending_high_quality_render = false;
+        let base_x = (width as f32 - display_w) * 0.5 + self.pan.0;
+        let base_y = (height as f32 - display_h) * 0.5 + self.pan.1;
+        let scale_x = display_w / level.full_width.max(1) as f32;
+        let scale_y = display_h / level.full_height.max(1) as f32;
+
+        let viewport = Rect::new(0.0, 0.0, width as f64, height as f64);
+        let mut display_list = Vec::with_capacity(level.tiles.len());
+
+        for tile in &level.tiles {
+            let tile_x = base_x + tile.x as f32 * scale_x;
+            let tile_y = base_y + tile.y as f32 * scale_y;
+            let tile_w = tile.width as f32 * scale_x;
+            let tile_h = tile.height as f32 * scale_y;
+
+            let tile_rect = Rect::new(
+                tile_x as f64,
+                tile_y as f64,
+                (tile_x + tile_w) as f64,
+                (tile_y + tile_h) as f64,
+            );
+
+            if !rects_intersect(&viewport, &tile_rect) {
+                continue;
+            }
+
+            display_list.push(DisplayItem {
+                image: tile.image.clone(),
+                transform: Affine::new([
+                    scale_x as f64,
+                    0.0,
+                    0.0,
+                    scale_y as f64,
+                    tile_x as f64,
+                    tile_y as f64,
+                ]),
+            });
+        }
+
+        display_list
     }
 
     fn draw_frame(&mut self) {
-        let Some((width, height, valid_surface, dev_id)) =
-            self.render_state.as_ref().map(|state| {
-                (
-                    state.surface.config.width,
-                    state.surface.config.height,
-                    state.valid_surface,
-                    state.surface.dev_id,
-                )
-            })
-        else {
+        self.poll_worker_responses();
+
+        let Some((width, height, valid_surface, dev_id)) = self.render_state.as_ref().map(|state| {
+            (
+                state.surface.config.width,
+                state.surface.config.height,
+                state.valid_surface,
+                state.surface.dev_id,
+            )
+        }) else {
             return;
         };
         if !valid_surface {
             return;
         }
 
-        self.ensure_page_image(width, height);
+        if self.view_dirty {
+            self.request_render_for_view(width, height);
+        }
+
         let (display_width, display_height) = self.current_display_size(width, height);
+        let display_list = self.build_display_list(width, height, display_width, display_height);
+
         let state = self
             .render_state
             .as_mut()
@@ -235,15 +386,8 @@ impl App {
             &Rect::new(0.0, 0.0, width as f64, height as f64),
         );
 
-        if let Some(cached) = &self.cached_page {
-            let x = (width as f32 - display_width) * 0.5 + self.pan.0;
-            let y = (height as f32 - display_height) * 0.5 + self.pan.1;
-            let scale_x = display_width / cached.target_width.max(1) as f32;
-            let scale_y = display_height / cached.target_height.max(1) as f32;
-            self.scene.draw_image(
-                &cached.image,
-                Affine::new([scale_x as f64, 0.0, 0.0, scale_y as f64, x as f64, y as f64]),
-            );
+        for item in display_list {
+            self.scene.draw_image(&item.image, item.transform);
         }
 
         let device_handle = &self.context.devices[dev_id];
@@ -316,7 +460,7 @@ impl App {
         if page_index != self.page_index {
             self.page_index = page_index;
             self.pan = (0.0, 0.0);
-            self.invalidate_cached_page();
+            self.mark_view_changed();
         }
     }
 }
@@ -359,6 +503,7 @@ impl ApplicationHandler for App {
             surface,
             valid_surface: true,
         });
+        self.mark_view_changed();
     }
 
     fn window_event(
@@ -384,10 +529,8 @@ impl ApplicationHandler for App {
                             .resize_surface(&mut state.surface, size.width, size.height);
                         state.valid_surface = true;
                     }
-                } else {
-                    if let Some(state) = &mut self.render_state {
-                        state.valid_surface = false;
-                    }
+                } else if let Some(state) = &mut self.render_state {
+                    state.valid_surface = false;
                 }
                 if let Some(state) = &self.render_state {
                     state.window.request_redraw();
@@ -462,14 +605,121 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        self.poll_worker_responses();
+
         if let Some(state) = &self.render_state {
-            if self.pending_high_quality_render
-                && self.last_view_change.elapsed() >= INTERACTION_SETTLE_DELAY
-            {
+            if !self.pending_requests.is_empty() || self.view_dirty {
                 state.window.request_redraw();
             }
         }
     }
+}
+
+fn spawn_render_worker(pdf_bytes: Vec<u8>) -> (Sender<WorkerRequest>, Receiver<WorkerResponse>) {
+    let (request_tx, request_rx) = mpsc::channel::<WorkerRequest>();
+    let (response_tx, response_rx) = mpsc::channel::<WorkerResponse>();
+
+    thread::spawn(move || {
+        let pdf = Pdf::new(pdf_bytes).expect("failed to parse PDF in render worker");
+        let render_cache = hayro::RenderCache::new();
+        let interpreter_settings = InterpreterSettings::default();
+        let pages = pdf.pages();
+
+        while let Ok(mut message) = request_rx.recv() {
+            while let Ok(next_message) = request_rx.try_recv() {
+                message = next_message;
+            }
+
+            match message {
+                WorkerRequest::Shutdown => break,
+                WorkerRequest::Render(key) => {
+                    let Some(page) = pages.get(key.page_index) else {
+                        continue;
+                    };
+                    let (page_w, page_h) = page.render_dimensions();
+
+                    let render_settings = RenderSettings {
+                        x_scale: key.width as f32 / page_w,
+                        y_scale: key.height as f32 / page_h,
+                        width: Some(
+                            u16::try_from(key.width)
+                                .expect("Page render width must fit in u16"),
+                        ),
+                        height: Some(
+                            u16::try_from(key.height)
+                                .expect("Page render height must fit in u16"),
+                        ),
+                        bg_color: WHITE,
+                    };
+
+                    let pixmap = render(page, &render_cache, &interpreter_settings, &render_settings);
+                    let rgba = pixmap.data_as_u8_slice().to_vec();
+
+                    if response_tx.send(WorkerResponse { key, rgba }).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+
+    (request_tx, response_rx)
+}
+
+fn build_tiled_level(response: WorkerResponse, last_used_tick: u64) -> CachedPageLevel {
+    let full_width = response.key.width;
+    let full_height = response.key.height;
+    let mut tiles = Vec::new();
+    let mut total_bytes = 0usize;
+
+    let stride = full_width as usize * 4;
+
+    for tile_y in (0..full_height).step_by(TILE_SIZE as usize) {
+        for tile_x in (0..full_width).step_by(TILE_SIZE as usize) {
+            let tile_width = (full_width - tile_x).min(TILE_SIZE);
+            let tile_height = (full_height - tile_y).min(TILE_SIZE);
+
+            let mut tile_rgba = vec![0u8; (tile_width * tile_height * 4) as usize];
+            for row in 0..tile_height as usize {
+                let src_start = (tile_y as usize + row) * stride + tile_x as usize * 4;
+                let src_end = src_start + tile_width as usize * 4;
+                let dst_start = row * tile_width as usize * 4;
+                let dst_end = dst_start + tile_width as usize * 4;
+                tile_rgba[dst_start..dst_end].copy_from_slice(&response.rgba[src_start..src_end]);
+            }
+
+            total_bytes += tile_rgba.len();
+
+            let image_data = ImageData {
+                data: Blob::new(Arc::new(tile_rgba)),
+                format: ImageFormat::Rgba8,
+                width: tile_width,
+                height: tile_height,
+                alpha_type: ImageAlphaType::Alpha,
+            };
+
+            tiles.push(CachedTile {
+                x: tile_x,
+                y: tile_y,
+                width: tile_width,
+                height: tile_height,
+                image: image_data.into(),
+            });
+        }
+    }
+
+    CachedPageLevel {
+        key: response.key,
+        full_width,
+        full_height,
+        tiles,
+        bytes: total_bytes,
+        last_used_tick,
+    }
+}
+
+fn rects_intersect(a: &Rect, b: &Rect) -> bool {
+    a.x0 < b.x1 && a.x1 > b.x0 && a.y0 < b.y1 && a.y1 > b.y0
 }
 
 fn main() {
@@ -491,7 +741,7 @@ fn main() {
         std::process::exit(1);
     });
 
-    let pdf = Pdf::new(pdf_bytes).unwrap_or_else(|error| {
+    let pdf = Pdf::new(pdf_bytes.clone()).unwrap_or_else(|error| {
         eprintln!(
             "CRITICAL: Failed to parse PDF file at '{}': {:?}",
             pdf_path.display(),
@@ -512,7 +762,7 @@ fn main() {
     }
 
     let event_loop = EventLoop::new().expect("failed to create event loop");
-    let mut app = App::new(pdf, page_sizes);
+    let mut app = App::new(pdf_bytes, page_sizes);
     event_loop
         .run_app(&mut app)
         .expect("event loop exited with error");
