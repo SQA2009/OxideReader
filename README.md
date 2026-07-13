@@ -4,7 +4,7 @@
 
 This code was crafted with the help of **Github Copilot**. So if something doesn't work, feel free to blame the robots. But if it *does* work? That was totally on purpose.
 
-**OxideReader** is the *ultimate* PDF viewer you never knew you needed—because who doesn't want to *destroy* Adobe Acrobat Pro with a Rust program? Built with **hayro** for pure-Rust PDF rendering and **Skia** with Vulkan for blazing-fast GPU-accelerated drawing, this tool is designed to be a *sleek* (or at least *functional*) alternative to the bloated giants of the PDF world. The old Python prototype days are over—welcome to the Rust era.
+**OxideReader** is the *ultimate* PDF viewer you never knew you needed—because who doesn't want to *destroy* Adobe Acrobat Pro with a Rust program? Built with **hayro** for pure-Rust PDF rendering and **Vello** (wgpu) for blazing-fast GPU-accelerated drawing, this tool is designed to be a *sleek* (or at least *functional*) alternative to the bloated giants of the PDF world. The old Python prototype days are over—welcome to the Rust era.
 
 > **Note:** The previous Python versions (`acrobatprokiller.py`, `pdf31.py`, and all earlier iterations) have been archived under the [`Archive/`](./Archive/) folder for historical reference.
 
@@ -12,7 +12,7 @@ This code was crafted with the help of **Github Copilot**. So if something doesn
 
 ## Features
 
-- **Fast PDF Rendering:** Pure-Rust PDF rasterization via hayro with GPU-accelerated display via Skia + Vulkan.
+- **Fast PDF Rendering:** Pure-Rust PDF rasterization via hayro with GPU-accelerated display via Vello + wgpu.
 - **Smooth Zoom:** Mouse-wheel zoom and `+`/`-` keyboard shortcuts. Reset to 100% with `0`.
 - **Pan Support:** Click and drag to pan around large pages.
 - **Page Navigation:** Use `←` / `→` arrow keys to flip through pages.
@@ -25,7 +25,7 @@ This code was crafted with the help of **Github Copilot**. So if something doesn
 
 - [Rust toolchain](https://rustup.rs/) (stable, 1.70+)
 - No external PDFium library required (rendering is pure Rust).
-- A GPU driver that supports **Vulkan**.
+- A GPU driver that supports **Vulkan**, **Metal**, or **DirectX 12** via wgpu.
 
 ---
 
@@ -126,7 +126,7 @@ Feel like making this mess better? Go ahead, fork it. Submit a pull request. Or 
 | [**glutin**](https://github.com/rust-windowing/glutin) | OpenGL context creation | 0.31 |
 | [**glutin-winit**](https://github.com/rust-windowing/glutin) | Glutin + Winit integration helpers | 0.4 |
 | [**raw-window-handle**](https://github.com/rust-windowing/raw-window-handle) | Cross-platform raw window handle abstraction | 0.6 |
-| [**skia-safe**](https://github.com/rust-skia/rust-skia) | Rust bindings for the Skia 2D graphics library | 0.97 |
+| [**vello**](https://github.com/linebender/vello) | GPU-accelerated 2D renderer powered by wgpu | 0.6 |
 | [**gl**](https://github.com/brendanzab/gl-rs) | OpenGL function pointer loader | 0.14 |
 | [**hayro**](https://github.com/LaurenzV/hayro) | Pure-Rust PDF interpreter and renderer | 0.7 |
 
