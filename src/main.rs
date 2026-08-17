@@ -29,7 +29,6 @@ const MAX_TEXTURE_SIZE: u32 = 8192;
 const REQUEST_OVERSAMPLE: f32 = 1.15;
 const TILE_SIZE: u32 = 512;
 const DIM_QUANTIZE: u32 = 128;
-const MAX_LOD_LEVEL: u8 = 2;
 const MAX_CACHE_BYTES: usize = 256 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
@@ -168,9 +167,9 @@ impl App {
     }
 
     fn lod_for_zoom(zoom: f32) -> u8 {
-        if zoom < 0.65 {
+        if zoom < 0.45 {
             2
-        } else if zoom < 1.6 {
+        } else if zoom < 0.9 {
             1
         } else {
             0
@@ -184,22 +183,19 @@ impl App {
 
     fn make_cache_key_for_lod(
         &self,
-        width: u32,
-        height: u32,
         display_w: f32,
         display_h: f32,
+        scale_factor: f64,
         lod: u8,
     ) -> CacheKey {
         let lod_scale = 1.0 / ((1u32 << lod) as f32);
-        let requested_w = (display_w * REQUEST_OVERSAMPLE * lod_scale)
+        let physical_scale = scale_factor.max(1.0) as f32;
+        let requested_w = (display_w * physical_scale * REQUEST_OVERSAMPLE * lod_scale)
             .round()
             .clamp(32.0, MAX_TEXTURE_SIZE as f32) as u32;
-        let requested_h = (display_h * REQUEST_OVERSAMPLE * lod_scale)
+        let requested_h = (display_h * physical_scale * REQUEST_OVERSAMPLE * lod_scale)
             .round()
             .clamp(32.0, MAX_TEXTURE_SIZE as f32) as u32;
-
-        let requested_w = requested_w.min(width.max(32));
-        let requested_h = requested_h.min(height.max(32));
 
         CacheKey {
             page_index: self.page_index,
@@ -209,28 +205,15 @@ impl App {
         }
     }
 
-    fn request_render_for_view(&mut self, width: u32, height: u32) {
+    fn request_render_for_view(&mut self, width: u32, height: u32, scale_factor: f64) {
         let (display_w, display_h) = self.current_display_size(width, height);
         let desired_lod = Self::lod_for_zoom(self.zoom);
-
-        let mut lod_sequence = Vec::with_capacity(3);
-        lod_sequence.push(desired_lod);
-        if desired_lod < MAX_LOD_LEVEL {
-            lod_sequence.push(desired_lod + 1);
-        }
-        if desired_lod > 0 {
-            lod_sequence.push(desired_lod - 1);
-        }
-
-        for lod in lod_sequence {
-            let key = self.make_cache_key_for_lod(width, height, display_w, display_h, lod);
-            if self.page_cache.contains_key(&key) || self.pending_requests.contains(&key) {
-                continue;
-            }
-
-            if self.dispatch_render_request(key) {
-                self.pending_requests.insert(key);
-            }
+        let key = self.make_cache_key_for_lod(display_w, display_h, scale_factor, desired_lod);
+        if !self.page_cache.contains_key(&key)
+            && !self.pending_requests.contains(&key)
+            && self.dispatch_render_request(key)
+        {
+            self.pending_requests.insert(key);
         }
 
         self.view_dirty = false;
@@ -321,7 +304,7 @@ impl App {
     ) -> Vec<DisplayItem> {
         let desired_lod = Self::lod_for_zoom(self.zoom);
         let desired_key =
-            self.make_cache_key_for_lod(width, height, display_w, display_h, desired_lod);
+            self.make_cache_key_for_lod(display_w, display_h, scale_factor, desired_lod);
         let Some(best_key) =
             self.select_best_cached_key(desired_lod, desired_key.width, desired_key.height)
         else {
@@ -339,6 +322,8 @@ impl App {
         let page_scale_x = display_w / level.full_width.max(1) as f32;
         let page_scale_y = display_h / level.full_height.max(1) as f32;
         let subpixel_step = 1.0 / (scale_factor.max(1.0) * 3.0);
+        let snapped_base_x = (base_x as f64 / subpixel_step).round() * subpixel_step;
+        let snapped_base_y = (base_y as f64 / subpixel_step).round() * subpixel_step;
 
         let viewport = Rect::new(0.0, 0.0, width as f64, height as f64);
         let mut display_list = Vec::with_capacity(level.tiles.len().min(256));
@@ -368,36 +353,28 @@ impl App {
                     continue;
                 };
 
-                let tile_x = base_x as f64 + tile.x as f64 * page_scale_x as f64;
-                let tile_y = base_y as f64 + tile.y as f64 * page_scale_y as f64;
+                let tile_x = snapped_base_x + tile.x as f64 * page_scale_x as f64;
+                let tile_y = snapped_base_y + tile.y as f64 * page_scale_y as f64;
                 let tile_w = tile.width as f64 * page_scale_x as f64;
                 let tile_h = tile.height as f64 * page_scale_y as f64;
-
-                let snapped_x0 = (tile_x / subpixel_step).round() * subpixel_step;
-                let snapped_y0 = (tile_y / subpixel_step).round() * subpixel_step;
-                let snapped_x1 = ((tile_x + tile_w) / subpixel_step).round() * subpixel_step;
-                let snapped_y1 = ((tile_y + tile_h) / subpixel_step).round() * subpixel_step;
-
-                if snapped_x1 <= snapped_x0 || snapped_y1 <= snapped_y0 {
+                if tile_w <= 0.0 || tile_h <= 0.0 {
                     continue;
                 }
 
-                let tile_rect = Rect::new(snapped_x0, snapped_y0, snapped_x1, snapped_y1);
+                let tile_rect = Rect::new(tile_x, tile_y, tile_x + tile_w, tile_y + tile_h);
                 if !rects_intersect(&viewport, &tile_rect) {
                     continue;
                 }
 
-                let tile_scale_x = (snapped_x1 - snapped_x0) / tile.width.max(1) as f64;
-                let tile_scale_y = (snapped_y1 - snapped_y0) / tile.height.max(1) as f64;
                 display_list.push(DisplayItem {
                     image: tile.image.clone(),
                     transform: Affine::new([
-                        tile_scale_x,
+                        page_scale_x as f64,
                         0.0,
                         0.0,
-                        tile_scale_y,
-                        snapped_x0,
-                        snapped_y0,
+                        page_scale_y as f64,
+                        tile_x,
+                        tile_y,
                     ]),
                 });
             }
@@ -427,7 +404,7 @@ impl App {
         }
 
         if self.view_dirty {
-            self.request_render_for_view(width, height);
+            self.request_render_for_view(width, height, scale_factor);
         }
 
         let (display_width, display_height) = self.current_display_size(width, height);
